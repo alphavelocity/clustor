@@ -1,0 +1,30 @@
+[package]
+name = "clustor"
+version = "0.1.0"
+edition = "2024"
+description = "Rust-accelerated high-performance clustering algorithms"
+license = "Apache-2.0"
+repository = "https://github.com/alphavelocity/clustor"
+readme = "README.md"
+authors = ["Soumyadip Sarkar"]
+keywords = ["clustering", "kmeans", "dbscan", "optics", "gmm", "birch", "machine-learning"]
+categories = ["algorithms", "science"]
+
+[lib]
+name = "_clustor"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+parallel = ["rayon"]
+
+[dependencies]
+pyo3 = { version = "0.27.0", features = ["extension-module"] }
+numpy = "0.27.0"
+rand = "0.9"
+rayon = { version = "1.8", optional = true }
+thiserror = "2.0"
+ordered-float = "5.1"
+
+[package.metadata.docs.rs]
+all-features = true

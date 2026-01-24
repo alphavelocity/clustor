@@ -1,0 +1,58 @@
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "clustor"
+version = "0.1.0"
+description = "Rust-accelerated high-performance clustering algorithms."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Soumyadip Sarkar" }]
+keywords = [
+  "clustering",
+  "kmeans",
+  "dbscan",
+  "optics",
+  "gmm",
+  "birch",
+  "hierarchical-clustering",
+  "machine-learning",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+  "License :: OSI Approved :: Apache Software License",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Typing :: Typed",
+]
+dependencies = ["numpy>=1.21,<3.0"]
+
+[project.optional-dependencies]
+dev = ["maturin>=1,<2", "pre-commit>=3.7", "pytest>=8.0", "ruff>=0.6.9"]
+test = ["pytest>=8.0"]
+examples = [
+    "jupyter",
+    "matplotlib",
+]
+
+[project.urls]
+Homepage = "https://github.com/alphavelocity/clustor"
+Repository = "https://github.com/alphavelocity/clustor"
+Issues = "https://github.com/alphavelocity/clustor/issues"
+
+[tool.maturin]
+python-source = "python"
+module-name = "clustor._clustor"
+bindings = "pyo3"
