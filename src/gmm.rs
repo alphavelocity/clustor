@@ -64,7 +64,7 @@ fn validate_inputs(
 }
 
 #[inline]
-fn logsumexp(v: &[f64]) -> f64 {
+pub(crate) fn logsumexp(v: &[f64]) -> f64 {
     let mut m = f64::NEG_INFINITY;
     for &x in v {
         if x > m {
@@ -82,7 +82,7 @@ fn logsumexp(v: &[f64]) -> f64 {
 }
 
 #[inline]
-fn log_gaussian_diag(x: &[f64], mean: &[f64], var: &[f64], d: usize) -> f64 {
+pub(crate) fn log_gaussian_diag(x: &[f64], mean: &[f64], var: &[f64], d: usize) -> f64 {
     let mut log_det = 0.0;
     let mut quad = 0.0;
     for j in 0..d {
@@ -147,11 +147,95 @@ fn init_params(
     (weights, means, covars)
 }
 
+fn validate_sample_weight(sample_weight: &[f64], n_samples: usize) -> ClustorResult<f64> {
+    if sample_weight.len() != n_samples {
+        return Err(ClustorError::InvalidArg(
+            "sample_weight length does not match n_samples".into(),
+        ));
+    }
+    let mut total = 0.0;
+    for &w in sample_weight {
+        if !w.is_finite() {
+            return Err(ClustorError::InvalidArg(
+                "sample_weight values must be finite".into(),
+            ));
+        }
+        if w < 0.0 {
+            return Err(ClustorError::InvalidArg(
+                "sample_weight values must be >= 0".into(),
+            ));
+        }
+        total += w;
+    }
+    if total <= 0.0 {
+        return Err(ClustorError::InvalidArg(
+            "sample_weight must sum to a positive value".into(),
+        ));
+    }
+    Ok(total)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gmm_log_likelihoods_diag(
+    weights: &[f64],
+    means: &[f64],
+    covars: &[f64],
+    data: &[f64],
+    n_samples: usize,
+    d: usize,
+    k: usize,
+    mut resp: Option<&mut [f64]>,
+) -> Vec<f64> {
+    let mut log_likelihood = vec![0.0; n_samples];
+    let mut log_prob = vec![0.0; k];
+    for i in 0..n_samples {
+        let xi = &data[i * d..(i + 1) * d];
+        for c in 0..k {
+            let w = weights[c].max(1e-300);
+            let mu = &means[c * d..(c + 1) * d];
+            let var = &covars[c * d..(c + 1) * d];
+            log_prob[c] = w.ln() + log_gaussian_diag(xi, mu, var, d);
+        }
+        let lse = logsumexp(&log_prob);
+        log_likelihood[i] = lse;
+        if let Some(resp_buf) = resp.as_deref_mut() {
+            for c in 0..k {
+                resp_buf[i * k + c] = (log_prob[c] - lse).exp();
+            }
+        }
+    }
+    log_likelihood
+}
+
+pub fn gmm_log_resp_diag(
+    weights: &[f64],
+    means: &[f64],
+    covars: &[f64],
+    data: &[f64],
+    n_samples: usize,
+    d: usize,
+    k: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut resp = vec![0.0; n_samples * k];
+    let log_likelihood = gmm_log_likelihoods_diag(
+        weights,
+        means,
+        covars,
+        data,
+        n_samples,
+        d,
+        k,
+        Some(&mut resp),
+    );
+    (resp, log_likelihood)
+}
+
 pub fn fit_gmm_diag(
     data: &[f64],
     n_samples: usize,
     d: usize,
     params: &GmmParams,
+    sample_weight: Option<&[f64]>,
 ) -> ClustorResult<GmmOutput> {
     validate_inputs(data, n_samples, d, params.n_components)?;
     if params.tol < 0.0 {
@@ -167,6 +251,10 @@ pub fn fit_gmm_diag(
     let mut rng = StdRng::seed_from_u64(seed);
 
     let k = params.n_components;
+    let total_weight = match sample_weight {
+        Some(weights) => validate_sample_weight(weights, n_samples)?,
+        None => n_samples as f64,
+    };
     let (mut weights, mut means, mut covars) =
         init_params(&mut rng, data, n_samples, d, k, params.init.as_str());
     let mut resp = vec![0.0; n_samples * k];
@@ -191,12 +279,13 @@ pub fn fit_gmm_diag(
                 log_prob_k[c] = w.ln() + log_gaussian_diag(x, mu, var, d);
             }
             let lse = logsumexp(&log_prob_k);
-            ll_sum += lse;
+            let weight = sample_weight.map_or(1.0, |w| w[i]);
+            ll_sum += weight * lse;
             for c in 0..k {
                 resp[i * k + c] = (log_prob_k[c] - lse).exp();
             }
         }
-        let lb = ll_sum / (n_samples as f64);
+        let lb = ll_sum / total_weight;
         if params.verbose {
             eprintln!("[Clustor][GMM] iter={} lower_bound={}", n_iter, lb);
         }
@@ -210,20 +299,22 @@ pub fn fit_gmm_diag(
         // M step
         let mut nk = vec![0.0; k];
         for i in 0..n_samples {
+            let weight = sample_weight.map_or(1.0, |w| w[i]);
             for c in 0..k {
-                nk[c] += resp[i * k + c];
+                nk[c] += resp[i * k + c] * weight;
             }
         }
         for c in 0..k {
             nk[c] = nk[c].max(1e-12);
-            weights[c] = nk[c] / (n_samples as f64);
+            weights[c] = nk[c] / total_weight;
         }
         // means
         means.fill(0.0);
         for i in 0..n_samples {
             let x = &data[i * d..(i + 1) * d];
+            let weight = sample_weight.map_or(1.0, |w| w[i]);
             for c in 0..k {
-                let r = resp[i * k + c];
+                let r = resp[i * k + c] * weight;
                 let mu = &mut means[c * d..(c + 1) * d];
                 for (mu_j, x_j) in mu.iter_mut().zip(x.iter()) {
                     *mu_j += r * x_j;
@@ -241,8 +332,9 @@ pub fn fit_gmm_diag(
         covars.fill(0.0);
         for i in 0..n_samples {
             let x = &data[i * d..(i + 1) * d];
+            let weight = sample_weight.map_or(1.0, |w| w[i]);
             for c in 0..k {
-                let r = resp[i * k + c];
+                let r = resp[i * k + c] * weight;
                 let mu = &means[c * d..(c + 1) * d];
                 let var = &mut covars[c * d..(c + 1) * d];
                 for ((var_j, mu_j), x_j) in var.iter_mut().zip(mu.iter()).zip(x.iter()) {

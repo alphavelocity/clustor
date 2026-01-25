@@ -234,6 +234,7 @@ class GaussianMixture(_GaussianMixture):
         tol: Convergence tolerance.
         reg_covar: Non-negative regularization for diagonal covariance.
         init: Initialization strategy ("kmeans++" or "random").
+        sample_weight: Optional per-sample weights for fitting.
         random_state: Seed for reproducibility.
         verbose: Emit iteration diagnostics when True.
 
@@ -249,8 +250,10 @@ class GaussianMixture(_GaussianMixture):
         (1,)
     """
 
-    def fit(self, X):  # noqa: N802
-        return super().fit(_as_f64_2d(X))
+    def fit(self, X, *, sample_weight=None):  # noqa: N802
+        Xc = _as_f64_2d(X)
+        sw = None if sample_weight is None else _as_f64_1d(sample_weight, Xc.shape[0])
+        return super().fit(Xc, sample_weight=sw)
 
     def predict(self, X):  # noqa: N802
         return super().predict(_as_f64_2d(X))
@@ -424,7 +427,10 @@ def gaussian_mixture(X, n_components: int, **kwargs):
         >>> weights.shape
         (1,)
     """
-    return _gaussian_mixture(_as_f64_2d(X), int(n_components), **kwargs)
+    Xc = _as_f64_2d(X)
+    if "sample_weight" in kwargs and kwargs["sample_weight"] is not None:
+        kwargs["sample_weight"] = _as_f64_1d(kwargs["sample_weight"], Xc.shape[0])
+    return _gaussian_mixture(Xc, int(n_components), **kwargs)
 
 
 def optics(X, **kwargs):

@@ -29,7 +29,9 @@ use crate::birch::{BirchParams, fit_birch};
 use crate::bisecting::{BisectingParams, fit_bisecting_kmeans};
 use crate::dbscan::{DbscanParams, fit_dbscan};
 use crate::errors::ClustorError;
-use crate::gmm::{GmmParams, fit_gmm_diag, sample_gmm_diag};
+use crate::gmm::{
+    GmmParams, fit_gmm_diag, gmm_log_likelihoods_diag, gmm_log_resp_diag, sample_gmm_diag,
+};
 use crate::hac::{Linkage, hac_linkage};
 use crate::kmeans::{
     KMeansParams, MiniBatchParams, MiniBatchState, fit_kmeans, minibatch_fit, minibatch_partial_fit,
@@ -927,10 +929,11 @@ impl GaussianMixture {
         x: PyReadonlyArray2<f64>,
         sample_weight: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let _ = sample_weight;
         let x = x.as_array();
         let (n_samples, n_features) = x.dim();
         let data: Vec<f64> = x.iter().copied().collect();
+        let sample_weight_vec =
+            sample_weight.map(|weights| weights.as_array().iter().copied().collect::<Vec<f64>>());
 
         let params = GmmParams {
             n_components: self.n_components,
@@ -943,7 +946,15 @@ impl GaussianMixture {
         };
 
         let out = py
-            .detach(|| fit_gmm_diag(&data, n_samples, n_features, &params))
+            .detach(move || {
+                fit_gmm_diag(
+                    &data,
+                    n_samples,
+                    n_features,
+                    &params,
+                    sample_weight_vec.as_deref(),
+                )
+            })
             .map_err(map_err)?;
         self.weights_ = Some(out.weights.clone());
         self.means_ = Some(out.means.clone());
@@ -1014,42 +1025,7 @@ impl GaussianMixture {
         let data: Vec<f64> = x.iter().copied().collect();
 
         let resp = py.detach(|| {
-            let mut resp = vec![0.0; n_samples * k];
-            let mut log_prob = vec![0.0; k];
-            for i in 0..n_samples {
-                let xi = &data[i * d..(i + 1) * d];
-                for c in 0..k {
-                    let w = weights[c].max(1e-300);
-                    let mu = &means[c * d..(c + 1) * d];
-                    let var = &covars[c * d..(c + 1) * d];
-                    let mut log_det = 0.0;
-                    let mut quad = 0.0;
-                    for j in 0..d {
-                        let v = var[j].max(1e-12);
-                        log_det += v.ln();
-                        let diff = xi[j] - mu[j];
-                        quad += diff * diff / v;
-                    }
-                    let lg = -0.5 * ((d as f64) * 1.8378770664093453 + log_det + quad);
-                    log_prob[c] = w.ln() + lg;
-                }
-                let lse = {
-                    let mut m = f64::NEG_INFINITY;
-                    for &v in log_prob.iter() {
-                        if v > m {
-                            m = v;
-                        }
-                    }
-                    let mut s = 0.0;
-                    for &v in log_prob.iter() {
-                        s += (v - m).exp();
-                    }
-                    m + s.ln()
-                };
-                for c in 0..k {
-                    resp[i * k + c] = (log_prob[c] - lse).exp();
-                }
-            }
+            let (resp, _) = gmm_log_resp_diag(weights, means, covars, &data, n_samples, d, k);
             resp
         });
 
@@ -1079,41 +1055,7 @@ impl GaussianMixture {
         let data: Vec<f64> = x.iter().copied().collect();
 
         let scores = py.detach(|| {
-            let mut out = vec![0.0; n_samples];
-            let mut log_prob = vec![0.0; k];
-            for i in 0..n_samples {
-                let xi = &data[i * d..(i + 1) * d];
-                for c in 0..k {
-                    let w = weights[c].max(1e-300);
-                    let mu = &means[c * d..(c + 1) * d];
-                    let var = &covars[c * d..(c + 1) * d];
-                    let mut log_det = 0.0;
-                    let mut quad = 0.0;
-                    for j in 0..d {
-                        let v = var[j].max(1e-12);
-                        log_det += v.ln();
-                        let diff = xi[j] - mu[j];
-                        quad += diff * diff / v;
-                    }
-                    let lg = -0.5 * ((d as f64) * 1.8378770664093453 + log_det + quad);
-                    log_prob[c] = w.ln() + lg;
-                }
-                let lse = {
-                    let mut m = f64::NEG_INFINITY;
-                    for &v in log_prob.iter() {
-                        if v > m {
-                            m = v;
-                        }
-                    }
-                    let mut s = 0.0;
-                    for &v in log_prob.iter() {
-                        s += (v - m).exp();
-                    }
-                    m + s.ln()
-                };
-                out[i] = lse;
-            }
-            out
+            gmm_log_likelihoods_diag(weights, means, covars, &data, n_samples, d, k, None)
         });
 
         Ok(PyArray1::from_vec(py, scores))
@@ -1138,39 +1080,9 @@ impl GaussianMixture {
         let data: Vec<f64> = x.iter().copied().collect();
 
         let mean_ll = py.detach(|| {
-            let mut sum = 0.0;
-            let mut log_prob = vec![0.0; k];
-            for i in 0..n_samples {
-                let xi = &data[i * d..(i + 1) * d];
-                for c in 0..k {
-                    let w = weights[c].max(1e-300);
-                    let mu = &means[c * d..(c + 1) * d];
-                    let var = &covars[c * d..(c + 1) * d];
-                    let mut log_det = 0.0;
-                    let mut quad = 0.0;
-                    for j in 0..d {
-                        let v = var[j].max(1e-12);
-                        log_det += v.ln();
-                        let diff = xi[j] - mu[j];
-                        quad += diff * diff / v;
-                    }
-                    let lg = -0.5 * ((d as f64) * 1.8378770664093453 + log_det + quad);
-                    log_prob[c] = w.ln() + lg;
-                }
-                // logsumexp
-                let mut m = f64::NEG_INFINITY;
-                for &v in log_prob.iter() {
-                    if v > m {
-                        m = v;
-                    }
-                }
-                let mut s = 0.0;
-                for &v in log_prob.iter() {
-                    s += (v - m).exp();
-                }
-                sum += m + s.ln();
-            }
-            sum / (n_samples as f64)
+            let scores =
+                gmm_log_likelihoods_diag(weights, means, covars, &data, n_samples, d, k, None);
+            scores.iter().sum::<f64>() / (n_samples as f64)
         });
         Ok(mean_ll)
     }
@@ -1449,7 +1361,7 @@ fn dbscan_py<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, n_components, *, max_iter=100, tol=1e-3, reg_covar=1e-6, init="kmeans++", random_state=None, verbose=false))]
+#[pyo3(signature = (x, n_components, *, max_iter=100, tol=1e-3, reg_covar=1e-6, init="kmeans++", sample_weight=None, random_state=None, verbose=false))]
 #[allow(clippy::too_many_arguments)]
 fn gaussian_mixture<'py>(
     py: Python<'py>,
@@ -1459,12 +1371,15 @@ fn gaussian_mixture<'py>(
     tol: f64,
     reg_covar: f64,
     init: &str,
+    sample_weight: Option<PyReadonlyArray1<f64>>,
     random_state: Option<u64>,
     verbose: bool,
 ) -> PyResult<PyGaussianMixtureResult<'py>> {
     let x = x.as_array();
     let (n_samples, n_features) = x.dim();
     let data: Vec<f64> = x.iter().copied().collect();
+    let sample_weight_vec =
+        sample_weight.map(|weights| weights.as_array().iter().copied().collect::<Vec<f64>>());
     let params = GmmParams {
         n_components,
         max_iter,
@@ -1475,7 +1390,15 @@ fn gaussian_mixture<'py>(
         verbose,
     };
     let out = py
-        .detach(|| fit_gmm_diag(&data, n_samples, n_features, &params))
+        .detach(move || {
+            fit_gmm_diag(
+                &data,
+                n_samples,
+                n_features,
+                &params,
+                sample_weight_vec.as_deref(),
+            )
+        })
         .map_err(map_err)?;
     let w = PyArray1::from_vec(py, out.weights);
     let means = vec_to_pyarray2(py, n_components, n_features, out.means)?;

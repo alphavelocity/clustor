@@ -108,3 +108,25 @@ def test_gmm_invalid_params():
         clustor.GaussianMixture(2, tol=-1.0).fit(X)
     with pytest.raises(ValueError):
         clustor.GaussianMixture(2, reg_covar=-1.0).fit(X)
+
+
+def test_gmm_sample_weight_validation():
+    X = np.array([[0.0, 0.0], [10.0, 10.0]], dtype=np.float64)
+    gm = clustor.GaussianMixture(2, max_iter=10, tol=1e-6, random_state=0)
+    with pytest.raises(ValueError):
+        gm.fit(X, sample_weight=np.array([1.0]))
+    with pytest.raises(ValueError):
+        gm.fit(X, sample_weight=np.array([1.0, -1.0]))
+    with pytest.raises(ValueError):
+        gm.fit(X, sample_weight=np.array([0.0, 0.0]))
+
+
+def test_gmm_sample_weight_bias():
+    X = np.array([[0.0, 0.0], [10.0, 10.0]], dtype=np.float64)
+    weights = np.array([10.0, 1.0], dtype=np.float64)
+    gm = clustor.GaussianMixture(
+        2, max_iter=20, tol=1e-6, init="kmeans++", random_state=0
+    )
+    out = gm.fit(X, sample_weight=weights)
+    assert np.isclose(out["weights"].sum(), 1.0)
+    assert out["weights"].max() > 0.8
