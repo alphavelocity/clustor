@@ -44,14 +44,10 @@ you need reweighting or resampling.
 
 ### Python (recommended)
 
-Use a virtual environment, then install build tools and the package:
+Install from pypi:
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -U pip
-pip install -U maturin numpy
-maturin develop --release
+pip install clustor
 ```
 
 ### Local development
@@ -356,37 +352,15 @@ All estimators accept NumPy arrays and return NumPy arrays for outputs. Methods 
 
 - `silhouette_score`, `calinski_harabasz_score`, `davies_bouldin_score`
 
-## Data handling and performance
-
-- Inputs are converted to contiguous `float64` NumPy arrays for predictable performance.
-- Heavy computation runs outside the Python GIL for improved multi-threaded throughput when
-  Python threads are present.
-- Algorithms are implemented in Rust with minimal dependencies to keep builds lightweight.
-
 ## Example notebooks
 
 Each notebook is executed with deterministic inputs and includes narrative context plus outputs.
 
-- `examples/01_kmeans_family.ipynb`: KMeans, MiniBatchKMeans, and BisectingKMeans.
-- `examples/02_density_clustering.ipynb`: DBSCAN and OPTICS.
-- `examples/03_affinity_birch.ipynb`: Affinity Propagation and Birch.
-- `examples/04_gaussian_mixture_metrics.ipynb`: GaussianMixture and validation metrics.
-- `examples/05_hac_linkage.ipynb`: HAC linkage matrices.
-
-## Production readiness
-
-- Deterministic results when `random_state` is provided, including in the notebooks.
-- Strict input validation for shape mismatches, empty datasets, and invalid cluster counts.
-- GIL-free Rust kernels for improved parallel throughput in Python pipelines.
-- Typed Python API surface (`py.typed`) with docstrings that include args/returns/examples.
-
-## Edge cases and validation
-
-- Estimators raise `ValueError` for empty inputs, invalid shapes, or non-positive `n_clusters`.
-- Weight-aware estimators validate that `sample_weight` has the same length as `X`.
-- `MiniBatchKMeans.partial_fit` requires a prior `fit` call and consistent feature dimensions.
-- Validation metrics ignore noise labels (`-1`) and require at least two non-noise clusters; they
-  raise `ValueError` when the input data or label configuration is invalid.
+- [`examples/01_kmeans_family.ipynb`](https://github.com/alphavelocity/clustor/blob/main/examples/01_kmeans_family.ipynb): KMeans, MiniBatchKMeans, and BisectingKMeans.
+- [`examples/02_density_clustering.ipynb`](https://github.com/alphavelocity/clustor/blob/main/examples/02_density_clustering.ipynb): DBSCAN and OPTICS.
+- [`examples/03_affinity_birch.ipynb`](https://github.com/alphavelocity/clustor/blob/main/examples/03_affinity_birch.ipynb): Affinity Propagation and Birch.
+- [`examples/04_gaussian_mixture_metrics.ipynb`](https://github.com/alphavelocity/clustor/blob/main/examples/04_gaussian_mixture_metrics.ipynb): GaussianMixture and validation metrics.
+- [`examples/05_hac_linkage.ipynb`](https://github.com/alphavelocity/clustor/blob/main/examples/05_hac_linkage.ipynb): HAC linkage matrices.
 
 ## Testing and quality
 
