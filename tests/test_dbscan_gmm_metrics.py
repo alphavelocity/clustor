@@ -67,6 +67,36 @@ def test_validation_metrics():
     assert db > 0
 
 
+def test_calinski_harabasz_zero_dispersion():
+    X = np.array(
+        [
+            [1.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    labels = np.array([0, 1, 0, 1], dtype=np.int64)
+    with pytest.raises(ValueError):
+        clustor.calinski_harabasz_score(X, labels)
+
+
+def test_calinski_harabasz_infinite_when_clusters_separated():
+    X = np.array(
+        [
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [5.0, 5.0],
+            [5.0, 5.0],
+        ],
+        dtype=np.float64,
+    )
+    labels = np.array([0, 0, 1, 1], dtype=np.int64)
+    score = clustor.calinski_harabasz_score(X, labels)
+    assert np.isinf(score)
+
+
 def test_silhouette_singletons_and_noise():
     X = np.array([[0.0, 0.0], [2.0, 0.0], [4.0, 0.0]], dtype=np.float64)
     labels = np.array([0, 1, 2], dtype=np.int64)

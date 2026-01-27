@@ -215,6 +215,19 @@ pub fn calinski_harabasz_score(
             w += s;
         }
     }
+    if !b.is_finite() || !w.is_finite() || w < 0.0 {
+        return Err(ClustorError::InvalidArg(
+            "Calinski-Harabasz score is undefined for non-finite dispersion".into(),
+        ));
+    }
+    if w == 0.0 {
+        if b == 0.0 {
+            return Err(ClustorError::InvalidArg(
+                "Calinski-Harabasz score undefined for zero dispersion".into(),
+            ));
+        }
+        return Ok(f64::INFINITY);
+    }
     let kf = k as f64;
     let nf = n as f64;
     Ok((b / (kf - 1.0)) / (w / (nf - kf)))
