@@ -402,7 +402,11 @@ impl MiniBatchKMeans {
         x: PyReadonlyArray2<f64>,
         sample_weight: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let _ = sample_weight;
+        if sample_weight.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "sample_weight is not supported for MiniBatchKMeans",
+            ));
+        }
         let x = x.as_array();
         let (n_samples, n_features) = x.dim();
         let data: Vec<f64> = x.iter().copied().collect();
@@ -449,8 +453,10 @@ impl MiniBatchKMeans {
         let state = self.state.as_mut().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("Model not initialized; call fit() first")
         })?;
-        py.detach(|| minibatch_partial_fit(state, &data, n_samples, n_features, self.verbose))
-            .map_err(map_err)?;
+        py.detach(|| {
+            minibatch_partial_fit(state, &data, n_samples, n_features, self.verbose, false)
+        })
+        .map_err(map_err)?;
 
         let d = PyDict::new(py);
         let centers_arr = vec_to_pyarray2(py, self.n_clusters, n_features, state.centers.clone())?;

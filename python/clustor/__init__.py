@@ -148,7 +148,9 @@ class MiniBatchKMeans(_MiniBatchKMeans):
         array([0, 0])
     """
 
-    def fit(self, X):  # noqa: N802
+    def fit(self, X, *, sample_weight=None):  # noqa: N802
+        if sample_weight is not None:
+            raise ValueError("sample_weight is not supported for MiniBatchKMeans")
         return super().fit(_as_f64_2d(X))
 
     def partial_fit(self, X):  # noqa: N802

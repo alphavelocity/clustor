@@ -7,7 +7,8 @@
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
+use rand::seq::index::sample;
+use std::borrow::Cow
 
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::{Metric, cosine_distance, euclidean_sq, l2_norm, normalize_in_place};
@@ -349,6 +350,7 @@ pub struct MiniBatchState {
     pub n_features: usize,
     pub metric: Metric,
     pub normalize_centers: bool,
+    pub normalize_input: bool,
 }
 
 fn minibatch_validate(
@@ -407,6 +409,7 @@ pub fn minibatch_init(
         n_features,
         metric: params.metric,
         normalize_centers: params.metric == Metric::Cosine && params.normalize_centers,
+        normalize_input: params.metric == Metric::Cosine && params.normalize_input,
     })
 }
 
@@ -416,6 +419,7 @@ pub fn minibatch_partial_fit(
     n_samples: usize,
     n_features: usize,
     verbose: bool,
+    input_pre_normalized: bool,
 ) -> ClustorResult<()> {
     if state.centers.is_empty() {
         return Err(ClustorError::InvalidArg(
@@ -442,14 +446,22 @@ pub fn minibatch_partial_fit(
         center_norms = Some(cn);
     }
 
+    let data = if state.metric == Metric::Cosine && state.normalize_input && !input_pre_normalized {
+        let mut normalized_batch = batch_in.to_vec();
+        maybe_normalize_input(&mut normalized_batch, n_samples, n_features);
+        Cow::Owned(normalized_batch)
+    } else {
+        Cow::Borrowed(batch_in)
+    };
+
     let x_norms = if state.metric == Metric::Cosine {
-        Some(compute_row_norms(batch_in, n_samples, n_features))
+        Some(compute_row_norms(&data, n_samples, n_features))
     } else {
         None
     };
 
     for i in 0..n_samples {
-        let x = &batch_in[i * n_features..(i + 1) * n_features];
+        let x = &data[i * n_features..(i + 1) * n_features];
         let mut best_k = 0usize;
         let mut best_d = f64::INFINITY;
         for c in 0..state.counts.len() {
@@ -514,17 +526,22 @@ pub fn minibatch_fit(
 
     for step in 1..=params.max_steps {
         let bs = params.batch_size.min(n_samples);
-        let mut idxs: Vec<usize> = (0..n_samples).collect();
-        idxs.shuffle(&mut rng);
-        idxs.truncate(bs);
+        let idxs = sample(&mut rng, n_samples, bs);
 
         let mut batch = vec![0.0; bs * n_features];
-        for (bi, &si) in idxs.iter().enumerate() {
+        for (bi, si) in idxs.iter().enumerate() {
             batch[bi * n_features..(bi + 1) * n_features]
                 .copy_from_slice(&data[si * n_features..(si + 1) * n_features]);
         }
 
-        minibatch_partial_fit(&mut state, &batch, bs, n_features, params.verbose)?;
+        minibatch_partial_fit(
+            &mut state,
+            &batch,
+            bs,
+            n_features,
+            params.verbose,
+            params.metric == Metric::Cosine && params.normalize_input,
+        )?;
 
         if params.verbose && step % 100 == 0 {
             eprintln!("[Clustor][MiniBatch] step={}", step);

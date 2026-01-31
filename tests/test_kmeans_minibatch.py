@@ -110,3 +110,13 @@ def test_minibatch_invalid_params():
         clustor.MiniBatchKMeans(n_clusters=0)
     with pytest.raises(ValueError):
         clustor.MiniBatchKMeans(n_clusters=2, batch_size=0)
+
+
+def test_minibatch_sample_weight_rejected():
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(10, 2))
+    mb = clustor.MiniBatchKMeans(
+        n_clusters=2, batch_size=4, max_steps=5, random_state=3
+    )
+    with pytest.raises(ValueError):
+        mb.fit(X, sample_weight=np.ones(10, dtype=np.float64))
