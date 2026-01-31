@@ -8,7 +8,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
-use std::borrow::Cow
+use std::borrow::Cow;
 
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::{Metric, cosine_distance, euclidean_sq, l2_norm, normalize_in_place};
