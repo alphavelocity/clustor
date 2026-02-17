@@ -17,13 +17,35 @@ fn validate(
     if n_samples == 0 || n_features == 0 {
         return Err(ClustorError::InvalidArg("X must be non-empty".into()));
     }
-    if data.len() != n_samples * n_features {
+    let expected_len = n_samples
+        .checked_mul(n_features)
+        .ok_or_else(|| ClustorError::InvalidArg("Input too large".into()))?;
+    if data.len() != expected_len {
         return Err(ClustorError::InvalidArg("X length mismatch".into()));
     }
     if labels.len() != n_samples {
         return Err(ClustorError::InvalidArg("labels length mismatch".into()));
     }
+    for (i, &lab) in labels.iter().enumerate() {
+        if lab < -1 {
+            return Err(ClustorError::InvalidArg(
+                "labels must be >= -1, where -1 denotes noise".into(),
+            ));
+        }
+        if lab >= 0 && !row_is_finite(data, i, n_features) {
+            return Err(ClustorError::InvalidArg(
+                "X must contain only finite values for non-noise samples".into(),
+            ));
+        }
+    }
     Ok(())
+}
+
+#[inline]
+fn row_is_finite(data: &[f64], i: usize, n_features: usize) -> bool {
+    data[i * n_features..(i + 1) * n_features]
+        .iter()
+        .all(|v| v.is_finite())
 }
 
 #[inline]
@@ -48,7 +70,7 @@ pub fn silhouette_score(
     use std::collections::HashMap;
     let mut label_to_cluster: HashMap<i64, usize> = HashMap::new();
     let mut cluster_sizes: Vec<usize> = Vec::new();
-    let mut sample_cluster = vec![None; n_samples];
+    let mut sample_cluster = vec![usize::MAX; n_samples];
     let mut non_noise_indices: Vec<usize> = Vec::new();
     for (i, &lab) in labels.iter().enumerate() {
         if lab < 0 {
@@ -64,7 +86,7 @@ pub fn silhouette_score(
             }
         };
         cluster_sizes[idx] += 1;
-        sample_cluster[i] = Some(idx);
+        sample_cluster[i] = idx;
         non_noise_indices.push(i);
     }
     let k = cluster_sizes.len();
@@ -73,12 +95,6 @@ pub fn silhouette_score(
             "Need at least 2 clusters (excluding noise) for silhouette_score".into(),
         ));
     }
-    if non_noise_indices.is_empty() {
-        return Err(ClustorError::InvalidArg(
-            "No non-noise samples for silhouette_score".into(),
-        ));
-    }
-
     let norms = if metric == Metric::Cosine {
         Some(compute_row_norms(data, n_samples, n_features))
     } else {
@@ -93,12 +109,14 @@ pub fn silhouette_score(
 
     for pos_i in 0..m {
         let i = non_noise_indices[pos_i];
-        let ci = sample_cluster[i].expect("cluster assigned for non-noise");
+        let ci = sample_cluster[i];
+        debug_assert_ne!(ci, usize::MAX);
         let xi = &data[i * n_features..(i + 1) * n_features];
         let ni = norms.as_ref().map(|v| v[i]);
         for pos_j in (pos_i + 1)..m {
             let j = non_noise_indices[pos_j];
-            let cj = sample_cluster[j].expect("cluster assigned for non-noise");
+            let cj = sample_cluster[j];
+            debug_assert_ne!(cj, usize::MAX);
             let xj = &data[j * n_features..(j + 1) * n_features];
             let nj = norms.as_ref().map(|v| v[j]);
             let d = dist(xi, ni, xj, nj, metric);
@@ -108,14 +126,12 @@ pub fn silhouette_score(
     }
 
     let mut total = 0.0;
-    let mut count = 0usize;
 
     for (pos, &i) in non_noise_indices.iter().enumerate() {
-        let ci = sample_cluster[i].expect("cluster assigned for non-noise");
+        let ci = sample_cluster[i];
+        debug_assert_ne!(ci, usize::MAX);
         let size = cluster_sizes[ci];
         if size <= 1 {
-            total += 0.0;
-            count += 1;
             continue;
         }
 
@@ -133,15 +149,9 @@ pub fn silhouette_score(
 
         let denom = a.max(b).max(1e-12);
         total += (b - a) / denom;
-        count += 1;
     }
 
-    if count == 0 {
-        return Err(ClustorError::InvalidArg(
-            "No valid samples for silhouette_score".into(),
-        ));
-    }
-    Ok(total / (count as f64))
+    Ok(total / (m as f64))
 }
 
 /// Calinski-Harabasz index (higher is better). Noise (-1) ignored.
@@ -306,4 +316,96 @@ pub fn davies_bouldin_score(
         sum_r += max_r;
     }
     Ok(sum_r / (k as f64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data_with_non_finite_noise() -> (Vec<f64>, Vec<i64>) {
+        (
+            vec![
+                f64::NAN,
+                f64::INFINITY,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                5.0,
+                0.0,
+                5.0,
+                1.0,
+            ],
+            vec![-1, 0, 0, 1, 1],
+        )
+    }
+
+    fn assert_invalid_arg(res: ClustorResult<f64>, expected_substr: &str) {
+        match res {
+            Err(ClustorError::InvalidArg(msg)) => assert!(msg.contains(expected_substr)),
+            other => panic!("expected InvalidArg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validation_metrics_ignore_non_finite_noise_rows() {
+        let (data, labels) = data_with_non_finite_noise();
+
+        let sil = silhouette_score(&data, 5, 2, &labels, Metric::Euclidean).unwrap();
+        let ch = calinski_harabasz_score(&data, 5, 2, &labels).unwrap();
+        let db = davies_bouldin_score(&data, 5, 2, &labels).unwrap();
+
+        assert!(sil.is_finite());
+        assert!((-1.0..=1.0).contains(&sil));
+        assert!(ch.is_finite());
+        assert!(db.is_finite());
+    }
+
+    #[test]
+    fn validation_metrics_reject_non_finite_non_noise_rows() {
+        let data = vec![0.0, 0.0, f64::NAN, 1.0, 2.0, f64::INFINITY];
+        let labels = vec![0, 0, 1];
+
+        assert_invalid_arg(
+            silhouette_score(&data, 3, 2, &labels, Metric::Euclidean),
+            "finite",
+        );
+        assert_invalid_arg(calinski_harabasz_score(&data, 3, 2, &labels), "finite");
+        assert_invalid_arg(davies_bouldin_score(&data, 3, 2, &labels), "finite");
+    }
+
+    #[test]
+    fn validation_rejects_invalid_negative_labels() {
+        let data = vec![0.0, 0.0, 1.0, 1.0];
+        let labels = vec![-2, 0];
+
+        assert_invalid_arg(
+            silhouette_score(&data, 2, 2, &labels, Metric::Euclidean),
+            "labels must be >= -1",
+        );
+        assert_invalid_arg(
+            calinski_harabasz_score(&data, 2, 2, &labels),
+            "labels must be >= -1",
+        );
+        assert_invalid_arg(
+            davies_bouldin_score(&data, 2, 2, &labels),
+            "labels must be >= -1",
+        );
+    }
+
+    #[test]
+    fn validation_rejects_overflowing_shape_product() {
+        assert_invalid_arg(
+            silhouette_score(&[], usize::MAX, 2, &[], Metric::Euclidean),
+            "Input too large",
+        );
+        assert_invalid_arg(
+            calinski_harabasz_score(&[], usize::MAX, 2, &[]),
+            "Input too large",
+        );
+        assert_invalid_arg(
+            davies_bouldin_score(&[], usize::MAX, 2, &[]),
+            "Input too large",
+        );
+    }
 }

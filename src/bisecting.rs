@@ -4,7 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use rand::RngCore;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -241,7 +241,7 @@ pub fn fit_bisecting_kmeans(
             metric: params.metric,
             normalize_input: false, // already normalized above if needed
             normalize_centers: params.normalize_centers,
-            random_state: Some(rng.next_u64()),
+            random_state: Some(rng.random::<u64>()),
             verbose: params.verbose,
         };
 

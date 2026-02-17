@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::metrics::{Metric, cosine_distance, euclidean_sq, l2_norm};
-use rand::Rng;
+use rand::RngExt;
 
 pub fn compute_row_norms(data: &[f64], n_samples: usize, n_features: usize) -> Vec<f64> {
     let mut norms = Vec::with_capacity(n_samples);
@@ -17,14 +17,14 @@ pub fn compute_row_norms(data: &[f64], n_samples: usize, n_features: usize) -> V
 }
 
 #[inline]
-pub fn pick_random_index<R: Rng>(rng: &mut R, n: usize) -> usize {
+pub fn pick_random_index<R: RngExt>(rng: &mut R, n: usize) -> usize {
     rng.random_range(0..n)
 }
 
 /// KMeans++ initialization (Arthur & Vassilvitskii, 2007).
 /// Returns centers as a flat Vec (k * n_features).
 #[allow(clippy::too_many_arguments)]
-pub fn kmeans_plus_plus<R: Rng>(
+pub fn kmeans_plus_plus<R: RngExt>(
     rng: &mut R,
     data: &[f64],
     n_samples: usize,

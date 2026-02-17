@@ -67,6 +67,48 @@ def test_validation_metrics():
     assert db > 0
 
 
+@pytest.mark.parametrize(
+    ("score_fn", "kwargs"),
+    [
+        (clustor.silhouette_score, {"metric": "euclidean"}),
+        (clustor.calinski_harabasz_score, {}),
+        (clustor.davies_bouldin_score, {}),
+    ],
+)
+def test_validation_metrics_reject_non_finite_inputs(score_fn, kwargs):
+    X = np.array([[0.0, 0.0], [np.nan, 1.0], [2.0, np.inf]], dtype=np.float64)
+    labels = np.array([0, 0, 1], dtype=np.int64)
+    with pytest.raises(ValueError, match="finite"):
+        score_fn(X, labels, **kwargs)
+
+
+def test_validation_metrics_ignore_non_finite_noise_rows():
+    X = np.array(
+        [
+            [np.nan, np.inf],
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [5.0, 0.0],
+            [5.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    labels = np.array([-1, 0, 0, 1, 1], dtype=np.int64)
+
+    s = clustor.silhouette_score(X, labels)
+    assert np.isfinite(s)
+    assert -1.0 <= s <= 1.0
+    assert np.isfinite(clustor.calinski_harabasz_score(X, labels))
+    assert np.isfinite(clustor.davies_bouldin_score(X, labels))
+
+
+def test_silhouette_reference_value_regression():
+    X = np.array([[0.0, 0.0], [0.0, 1.0], [10.0, 0.0], [10.0, 1.0]], dtype=np.float64)
+    labels = np.array([0, 0, 1, 1], dtype=np.int64)
+    s = clustor.silhouette_score(X, labels)
+    assert np.isclose(s, 0.9002487577582194)
+
+
 def test_calinski_harabasz_zero_dispersion():
     X = np.array(
         [
@@ -95,6 +137,18 @@ def test_calinski_harabasz_infinite_when_clusters_separated():
     labels = np.array([0, 0, 1, 1], dtype=np.int64)
     score = clustor.calinski_harabasz_score(X, labels)
     assert np.isinf(score)
+
+
+def test_validation_metrics_invalid_negative_labels():
+    X = np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float64)
+    labels = np.array([-2, 0], dtype=np.int64)
+
+    with pytest.raises(ValueError, match=r"labels.*>= -1"):
+        clustor.silhouette_score(X, labels)
+    with pytest.raises(ValueError, match=r"labels.*>= -1"):
+        clustor.calinski_harabasz_score(X, labels)
+    with pytest.raises(ValueError, match=r"labels.*>= -1"):
+        clustor.davies_bouldin_score(X, labels)
 
 
 def test_silhouette_singletons_and_noise():

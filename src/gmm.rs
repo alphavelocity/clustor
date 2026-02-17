@@ -4,7 +4,7 @@
 // This source code is licensed under the Apache-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
@@ -366,7 +366,7 @@ pub fn fit_gmm_diag(
 
 // Sampling from standard normal via Box-Muller (no extra deps).
 #[inline]
-fn std_normal<R: Rng>(rng: &mut R) -> f64 {
+fn std_normal<R: RngExt>(rng: &mut R) -> f64 {
     let u1: f64 = rng.random_range(1e-12..1.0);
     let u2: f64 = rng.random_range(0.0..1.0);
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
