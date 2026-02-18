@@ -5,7 +5,7 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::errors::{ClustorError, ClustorResult};
-use crate::metrics::{Metric, cosine_distance, euclidean_sq};
+use crate::metrics::{Metric, cosine_distance};
 use crate::utils::compute_row_norms;
 
 fn validate(
@@ -49,11 +49,51 @@ fn row_is_finite(data: &[f64], i: usize, n_features: usize) -> bool {
 }
 
 #[inline]
-fn dist(a: &[f64], an: Option<f64>, b: &[f64], bn: Option<f64>, metric: Metric) -> f64 {
+fn dist(
+    a: &[f64],
+    an: Option<f64>,
+    b: &[f64],
+    bn: Option<f64>,
+    metric: Metric,
+    euclidean_inv_scale: f64,
+) -> f64 {
     match metric {
-        Metric::Euclidean => euclidean_sq(a, b).sqrt(),
+        Metric::Euclidean => euclidean_distance_scaled(a, b, euclidean_inv_scale),
         Metric::Cosine => cosine_distance(a, an.unwrap(), b, bn.unwrap()),
     }
+}
+
+#[inline]
+fn euclidean_distance_scaled(a: &[f64], b: &[f64], inv_scale: f64) -> f64 {
+    let mut s = 0.0;
+    for i in 0..a.len() {
+        let d = a[i] * inv_scale - b[i] * inv_scale;
+        s += d * d;
+    }
+    s.sqrt()
+}
+
+#[inline]
+fn non_noise_inv_scale_from_labels(
+    data: &[f64],
+    n_samples: usize,
+    n_features: usize,
+    labels: &[i64],
+) -> f64 {
+    let mut max_abs = 0.0;
+    for (i, &lab) in labels.iter().take(n_samples).enumerate() {
+        if lab < 0 {
+            continue;
+        }
+        let row = &data[i * n_features..(i + 1) * n_features];
+        for &v in row {
+            let a = v.abs();
+            if a > max_abs {
+                max_abs = a;
+            }
+        }
+    }
+    if max_abs > 0.0 { 1.0 / max_abs } else { 1.0 }
 }
 
 /// Silhouette score (mean over samples). Noise label -1 is ignored.
@@ -72,6 +112,7 @@ pub fn silhouette_score(
     let mut cluster_sizes: Vec<usize> = Vec::new();
     let mut sample_cluster = vec![usize::MAX; n_samples];
     let mut non_noise_indices: Vec<usize> = Vec::new();
+    let mut euclidean_max_abs = 0.0;
     for (i, &lab) in labels.iter().enumerate() {
         if lab < 0 {
             continue;
@@ -88,6 +129,15 @@ pub fn silhouette_score(
         cluster_sizes[idx] += 1;
         sample_cluster[i] = idx;
         non_noise_indices.push(i);
+        if metric == Metric::Euclidean {
+            let row = &data[i * n_features..(i + 1) * n_features];
+            for &v in row {
+                let a = v.abs();
+                if a > euclidean_max_abs {
+                    euclidean_max_abs = a;
+                }
+            }
+        }
     }
     let k = cluster_sizes.len();
     if k <= 1 {
@@ -99,6 +149,11 @@ pub fn silhouette_score(
         Some(compute_row_norms(data, n_samples, n_features))
     } else {
         None
+    };
+    let euclidean_inv_scale = if metric == Metric::Euclidean && euclidean_max_abs > 0.0 {
+        1.0 / euclidean_max_abs
+    } else {
+        1.0
     };
 
     let m = non_noise_indices.len();
@@ -119,7 +174,7 @@ pub fn silhouette_score(
             debug_assert_ne!(cj, usize::MAX);
             let xj = &data[j * n_features..(j + 1) * n_features];
             let nj = norms.as_ref().map(|v| v[j]);
-            let d = dist(xi, ni, xj, nj, metric);
+            let d = dist(xi, ni, xj, nj, metric, euclidean_inv_scale);
             sums[pos_i * k + cj] += d;
             sums[pos_j * k + ci] += d;
         }
@@ -146,7 +201,6 @@ pub fn silhouette_score(
                 b = mean;
             }
         }
-
         let denom = a.max(b).max(1e-12);
         total += (b - a) / denom;
     }
@@ -182,6 +236,8 @@ pub fn calinski_harabasz_score(
         return Err(ClustorError::InvalidArg("Not enough samples".into()));
     }
 
+    let inv_scale = non_noise_inv_scale_from_labels(data, n_samples, n_features, labels);
+
     let mut overall = vec![0.0; n_features];
     for i in 0..n_samples {
         if labels[i] < 0 {
@@ -211,7 +267,7 @@ pub fn calinski_harabasz_score(
         }
         let mut dist2 = 0.0;
         for j in 0..n_features {
-            let d = mu[j] - overall[j];
+            let d = (mu[j] - overall[j]) * inv_scale;
             dist2 += d * d;
         }
         b += (idxs.len() as f64) * dist2;
@@ -219,16 +275,11 @@ pub fn calinski_harabasz_score(
             let x = &data[i * n_features..(i + 1) * n_features];
             let mut s = 0.0;
             for j in 0..n_features {
-                let d = x[j] - mu[j];
+                let d = (x[j] - mu[j]) * inv_scale;
                 s += d * d;
             }
             w += s;
         }
-    }
-    if !b.is_finite() || !w.is_finite() || w < 0.0 {
-        return Err(ClustorError::InvalidArg(
-            "Calinski-Harabasz score is undefined for non-finite dispersion".into(),
-        ));
     }
     if w == 0.0 {
         if b == 0.0 {
@@ -266,6 +317,8 @@ pub fn davies_bouldin_score(
         ));
     }
 
+    let inv_scale = non_noise_inv_scale_from_labels(data, n_samples, n_features, labels);
+
     let mut centroids: Vec<Vec<f64>> = Vec::with_capacity(k);
     let mut scatters: Vec<f64> = Vec::with_capacity(k);
 
@@ -285,7 +338,7 @@ pub fn davies_bouldin_score(
             let x = &data[i * n_features..(i + 1) * n_features];
             let mut d2 = 0.0;
             for j in 0..n_features {
-                let d = x[j] - mu[j];
+                let d = (x[j] - mu[j]) * inv_scale;
                 d2 += d * d;
             }
             s += d2.sqrt();
@@ -304,7 +357,7 @@ pub fn davies_bouldin_score(
             }
             let mut d2 = 0.0;
             for (&ci, &cj) in centroids[i].iter().zip(centroids[j].iter()) {
-                let d = ci - cj;
+                let d = (ci - cj) * inv_scale;
                 d2 += d * d;
             }
             let d = d2.sqrt().max(1e-12);
@@ -407,5 +460,20 @@ mod tests {
             davies_bouldin_score(&[], usize::MAX, 2, &[]),
             "Input too large",
         );
+    }
+
+    #[test]
+    fn validation_metrics_handle_large_finite_values_without_overflow() {
+        let data = vec![0.0, 0.0, 1e308, 1e308, -1e308, -1e308];
+        let labels = vec![0, 1, 1];
+
+        let sil = silhouette_score(&data, 3, 2, &labels, Metric::Euclidean).unwrap();
+        let db = davies_bouldin_score(&data, 3, 2, &labels).unwrap();
+        let ch = calinski_harabasz_score(&data, 3, 2, &labels).unwrap();
+
+        assert!(sil.is_finite());
+        assert!((-1.0..=1.0).contains(&sil));
+        assert!(db.is_finite());
+        assert!(ch.is_finite());
     }
 }
