@@ -57,6 +57,20 @@ fn as_metric(metric: &str) -> Result<Metric, ClustorError> {
     })
 }
 
+fn validate_kmeans_like_init(n_clusters: usize, n_init: usize) -> PyResult<()> {
+    if n_clusters == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "n_clusters must be > 0",
+        ));
+    }
+    if n_init == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "n_init must be > 0",
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_i64_bounds(value: usize, context: &str) -> PyResult<()> {
     if i64::try_from(value).is_err() {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -167,16 +181,7 @@ impl KMeans {
         random_state: Option<u64>,
         verbose: bool,
     ) -> PyResult<Self> {
-        if n_clusters == 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "n_clusters must be > 0",
-            ));
-        }
-        if n_init == 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "n_init must be > 0",
-            ));
-        }
+        validate_kmeans_like_init(n_clusters, n_init)?;
         Ok(Self {
             n_clusters,
             n_init,
@@ -577,11 +582,7 @@ impl BisectingKMeans {
         random_state: Option<u64>,
         verbose: bool,
     ) -> PyResult<Self> {
-        if n_clusters < 1 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "n_clusters must be >= 1",
-            ));
-        }
+        validate_kmeans_like_init(n_clusters, n_init)?;
         Ok(Self {
             n_clusters,
             n_init,
@@ -1243,6 +1244,8 @@ fn kmeans_py<'py>(
     random_state: Option<u64>,
     verbose: bool,
 ) -> PyResult<PyKMeansResult<'py>> {
+    validate_kmeans_like_init(k, n_init)?;
+
     let x = x.as_array();
     let (n_samples, n_features) = x.dim();
     let data: Vec<f64> = x.iter().copied().collect();
@@ -1297,6 +1300,8 @@ fn bisecting_kmeans<'py>(
     random_state: Option<u64>,
     verbose: bool,
 ) -> PyResult<PyKMeansResult<'py>> {
+    validate_kmeans_like_init(k, n_init)?;
+
     let x = x.as_array();
     let (n_samples, n_features) = x.dim();
     let data: Vec<f64> = x.iter().copied().collect();

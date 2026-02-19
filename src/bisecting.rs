@@ -111,7 +111,7 @@ pub fn fit_bisecting_kmeans(
         return Err(ClustorError::InvalidArg("tol must be >= 0".into()));
     }
     if params.n_init == 0 {
-        return Err(ClustorError::InvalidArg("n_init must be >= 1".into()));
+        return Err(ClustorError::InvalidArg("n_init must be > 0".into()));
     }
     if let Some(w) = sample_weight {
         if w.len() != n_samples {
@@ -324,4 +324,47 @@ pub fn fit_bisecting_kmeans(
         inertia: total_inertia,
         n_splits: splits,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_params() -> BisectingParams {
+        BisectingParams {
+            n_clusters: 1,
+            n_init: 1,
+            max_iter: 10,
+            tol: 1e-4,
+            metric: Metric::Euclidean,
+            normalize_input: false,
+            normalize_centers: false,
+            random_state: Some(0),
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn bisecting_rejects_zero_n_init() {
+        let data = vec![0.0, 1.0, 2.0, 3.0]; // 2x2
+        let mut params = base_params();
+        params.n_init = 0;
+
+        match fit_bisecting_kmeans(&data, 2, 2, None, &params) {
+            Err(ClustorError::InvalidArg(msg)) => assert_eq!(msg, "n_init must be > 0"),
+            other => panic!("expected InvalidArg for n_init, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bisecting_rejects_zero_clusters() {
+        let data = vec![0.0, 1.0, 2.0, 3.0]; // 2x2
+        let mut params = base_params();
+        params.n_clusters = 0;
+
+        match fit_bisecting_kmeans(&data, 2, 2, None, &params) {
+            Err(ClustorError::InvalidArg(msg)) => assert_eq!(msg, "n_clusters must be > 0"),
+            other => panic!("expected InvalidArg for n_clusters, got {other:?}"),
+        }
+    }
 }

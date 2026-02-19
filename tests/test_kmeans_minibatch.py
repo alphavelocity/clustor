@@ -96,6 +96,19 @@ def test_bisecting_kmeans_three_blobs():
 def test_kmeans_invalid_params():
     with pytest.raises(ValueError):
         clustor.KMeans(n_clusters=0)
+    with pytest.raises(ValueError):
+        clustor.BisectingKMeans(n_clusters=0)
+    with pytest.raises(ValueError):
+        clustor.BisectingKMeans(n_clusters=2, n_init=0)
+    X = np.array([[0.0], [1.0]], dtype=np.float64)
+    with pytest.raises(ValueError):
+        clustor.kmeans(X, 0)
+    with pytest.raises(ValueError):
+        clustor.kmeans(X, 1, n_init=0)
+    with pytest.raises(ValueError):
+        clustor._clustor.bisecting_kmeans(X, 0)
+    with pytest.raises(ValueError):
+        clustor._clustor.bisecting_kmeans(X, 1, n_init=0)
 
 
 def test_kmeans_sample_weight_mismatch():
