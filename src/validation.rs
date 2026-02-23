@@ -7,6 +7,7 @@
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::{Metric, cosine_distance};
 use crate::utils::compute_row_norms;
+use std::collections::HashMap;
 
 fn validate(
     data: &[f64],
@@ -96,6 +97,26 @@ fn non_noise_inv_scale_from_labels(
     if max_abs > 0.0 { 1.0 / max_abs } else { 1.0 }
 }
 
+#[inline]
+fn build_clusters(labels: &[i64]) -> Vec<Vec<usize>> {
+    let mut label_to_cluster: HashMap<i64, usize> = HashMap::new();
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+
+    for (i, &lab) in labels.iter().enumerate() {
+        if lab < 0 {
+            continue;
+        }
+        let idx = *label_to_cluster.entry(lab).or_insert_with(|| {
+            let idx = clusters.len();
+            clusters.push(Vec::new());
+            idx
+        });
+        clusters[idx].push(i);
+    }
+
+    clusters
+}
+
 /// Silhouette score (mean over samples). Noise label -1 is ignored.
 /// O(n^2) implementation intended for moderate n.
 pub fn silhouette_score(
@@ -107,39 +128,32 @@ pub fn silhouette_score(
 ) -> ClustorResult<f64> {
     validate(data, n_samples, n_features, labels)?;
 
-    use std::collections::HashMap;
-    let mut label_to_cluster: HashMap<i64, usize> = HashMap::new();
-    let mut cluster_sizes: Vec<usize> = Vec::new();
-    let mut sample_cluster = vec![usize::MAX; n_samples];
-    let mut non_noise_indices: Vec<usize> = Vec::new();
+    let clusters = build_clusters(labels);
+    let cluster_sizes: Vec<usize> = clusters.iter().map(|idxs| idxs.len()).collect();
+    let k = cluster_sizes.len();
+    let m = cluster_sizes.iter().sum::<usize>();
+    let mut non_noise_indices: Vec<usize> = Vec::with_capacity(m);
+    let mut non_noise_cluster_indices: Vec<usize> = Vec::with_capacity(m);
     let mut euclidean_max_abs = 0.0;
-    for (i, &lab) in labels.iter().enumerate() {
-        if lab < 0 {
-            continue;
-        }
-        let idx = match label_to_cluster.get(&lab) {
-            Some(&idx) => idx,
-            None => {
-                let idx = cluster_sizes.len();
-                label_to_cluster.insert(lab, idx);
-                cluster_sizes.push(0);
-                idx
-            }
-        };
-        cluster_sizes[idx] += 1;
-        sample_cluster[i] = idx;
-        non_noise_indices.push(i);
-        if metric == Metric::Euclidean {
-            let row = &data[i * n_features..(i + 1) * n_features];
-            for &v in row {
-                let a = v.abs();
-                if a > euclidean_max_abs {
-                    euclidean_max_abs = a;
+
+    for (cluster_idx, idxs) in clusters.iter().enumerate() {
+        for &i in idxs {
+            non_noise_indices.push(i);
+            non_noise_cluster_indices.push(cluster_idx);
+            if metric == Metric::Euclidean {
+                let row = &data[i * n_features..(i + 1) * n_features];
+                for &v in row {
+                    let a = v.abs();
+                    if a > euclidean_max_abs {
+                        euclidean_max_abs = a;
+                    }
                 }
             }
         }
     }
-    let k = cluster_sizes.len();
+
+    debug_assert_eq!(non_noise_indices.len(), m);
+    debug_assert_eq!(non_noise_cluster_indices.len(), m);
     if k <= 1 {
         return Err(ClustorError::InvalidArg(
             "Need at least 2 clusters (excluding noise) for silhouette_score".into(),
@@ -156,7 +170,6 @@ pub fn silhouette_score(
         1.0
     };
 
-    let m = non_noise_indices.len();
     let sum_len = m
         .checked_mul(k)
         .ok_or_else(|| ClustorError::InvalidArg("Input too large".into()))?;
@@ -164,14 +177,12 @@ pub fn silhouette_score(
 
     for pos_i in 0..m {
         let i = non_noise_indices[pos_i];
-        let ci = sample_cluster[i];
-        debug_assert_ne!(ci, usize::MAX);
+        let ci = non_noise_cluster_indices[pos_i];
         let xi = &data[i * n_features..(i + 1) * n_features];
         let ni = norms.as_ref().map(|v| v[i]);
         for pos_j in (pos_i + 1)..m {
             let j = non_noise_indices[pos_j];
-            let cj = sample_cluster[j];
-            debug_assert_ne!(cj, usize::MAX);
+            let cj = non_noise_cluster_indices[pos_j];
             let xj = &data[j * n_features..(j + 1) * n_features];
             let nj = norms.as_ref().map(|v| v[j]);
             let d = dist(xi, ni, xj, nj, metric, euclidean_inv_scale);
@@ -182,9 +193,8 @@ pub fn silhouette_score(
 
     let mut total = 0.0;
 
-    for (pos, &i) in non_noise_indices.iter().enumerate() {
-        let ci = sample_cluster[i];
-        debug_assert_ne!(ci, usize::MAX);
+    for (pos, _i) in non_noise_indices.iter().enumerate() {
+        let ci = non_noise_cluster_indices[pos];
         let size = cluster_sizes[ci];
         if size <= 1 {
             continue;
@@ -216,14 +226,7 @@ pub fn calinski_harabasz_score(
     labels: &[i64],
 ) -> ClustorResult<f64> {
     validate(data, n_samples, n_features, labels)?;
-    use std::collections::BTreeMap;
-
-    let mut clusters: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
-    for (i, &lab) in labels.iter().enumerate() {
-        if lab >= 0 {
-            clusters.entry(lab).or_default().push(i);
-        }
-    }
+    let clusters = build_clusters(labels);
     let k = clusters.len();
     if k <= 1 {
         return Err(ClustorError::InvalidArg(
@@ -231,7 +234,7 @@ pub fn calinski_harabasz_score(
         ));
     }
 
-    let n = clusters.values().map(|v| v.len()).sum::<usize>();
+    let n = clusters.iter().map(|v| v.len()).sum::<usize>();
     if n <= k {
         return Err(ClustorError::InvalidArg("Not enough samples".into()));
     }
@@ -254,7 +257,7 @@ pub fn calinski_harabasz_score(
 
     let mut b = 0.0;
     let mut w = 0.0;
-    for (_lab, idxs) in clusters.iter() {
+    for idxs in clusters.iter() {
         let mut mu = vec![0.0; n_features];
         for &i in idxs.iter() {
             let x = &data[i * n_features..(i + 1) * n_features];
@@ -302,14 +305,7 @@ pub fn davies_bouldin_score(
     labels: &[i64],
 ) -> ClustorResult<f64> {
     validate(data, n_samples, n_features, labels)?;
-    use std::collections::BTreeMap;
-
-    let mut clusters: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
-    for (i, &lab) in labels.iter().enumerate() {
-        if lab >= 0 {
-            clusters.entry(lab).or_default().push(i);
-        }
-    }
+    let clusters = build_clusters(labels);
     let k = clusters.len();
     if k <= 1 {
         return Err(ClustorError::InvalidArg(
@@ -322,7 +318,7 @@ pub fn davies_bouldin_score(
     let mut centroids: Vec<Vec<f64>> = Vec::with_capacity(k);
     let mut scatters: Vec<f64> = Vec::with_capacity(k);
 
-    for (_lab, idxs) in clusters.iter() {
+    for idxs in clusters.iter() {
         let mut mu = vec![0.0; n_features];
         for &i in idxs.iter() {
             let x = &data[i * n_features..(i + 1) * n_features];
@@ -463,6 +459,44 @@ mod tests {
     }
 
     #[test]
+    fn validation_metrics_reject_all_noise_labels() {
+        let data = vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0];
+        let labels = vec![-1, -1, -1];
+
+        assert_invalid_arg(
+            silhouette_score(&data, 3, 2, &labels, Metric::Euclidean),
+            "at least 2 clusters",
+        );
+        assert_invalid_arg(
+            calinski_harabasz_score(&data, 3, 2, &labels),
+            "at least 2 clusters",
+        );
+        assert_invalid_arg(
+            davies_bouldin_score(&data, 3, 2, &labels),
+            "at least 2 clusters",
+        );
+    }
+
+    #[test]
+    fn validation_metrics_reject_all_noise_labels_with_non_finite_rows() {
+        let data = vec![f64::NAN, f64::INFINITY, 1.0, 1.0, -f64::INFINITY, 2.0];
+        let labels = vec![-1, -1, -1];
+
+        assert_invalid_arg(
+            silhouette_score(&data, 3, 2, &labels, Metric::Euclidean),
+            "at least 2 clusters",
+        );
+        assert_invalid_arg(
+            calinski_harabasz_score(&data, 3, 2, &labels),
+            "at least 2 clusters",
+        );
+        assert_invalid_arg(
+            davies_bouldin_score(&data, 3, 2, &labels),
+            "at least 2 clusters",
+        );
+    }
+
+    #[test]
     fn validation_metrics_handle_large_finite_values_without_overflow() {
         let data = vec![0.0, 0.0, 1e308, 1e308, -1e308, -1e308];
         let labels = vec![0, 1, 1];
@@ -475,5 +509,23 @@ mod tests {
         assert!((-1.0..=1.0).contains(&sil));
         assert!(db.is_finite());
         assert!(ch.is_finite());
+    }
+
+    #[test]
+    fn validation_metric_scores_are_invariant_to_label_values() {
+        let data = vec![0.0, 0.0, 0.0, 1.0, 10.0, 10.0, 10.0, 11.0, 50.0, 50.0];
+        let labels_a = vec![5, 5, 9, 9, -1];
+        let labels_b = vec![42, 42, 7, 7, -1];
+
+        let sil_a = silhouette_score(&data, 5, 2, &labels_a, Metric::Euclidean).unwrap();
+        let sil_b = silhouette_score(&data, 5, 2, &labels_b, Metric::Euclidean).unwrap();
+        let ch_a = calinski_harabasz_score(&data, 5, 2, &labels_a).unwrap();
+        let ch_b = calinski_harabasz_score(&data, 5, 2, &labels_b).unwrap();
+        let db_a = davies_bouldin_score(&data, 5, 2, &labels_a).unwrap();
+        let db_b = davies_bouldin_score(&data, 5, 2, &labels_b).unwrap();
+
+        assert!((sil_a - sil_b).abs() <= 1e-12);
+        assert!((ch_a - ch_b).abs() <= 1e-12);
+        assert!((db_a - db_b).abs() <= 1e-12);
     }
 }
