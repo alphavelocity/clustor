@@ -30,7 +30,10 @@ fn validate_inputs(data: &[f64], n_samples: usize, n_features: usize) -> Clustor
             "X must be non-empty 2D array".into(),
         ));
     }
-    if data.len() != n_samples * n_features {
+    let expected_len = n_samples
+        .checked_mul(n_features)
+        .ok_or_else(|| ClustorError::InvalidArg("X shape product overflows usize".into()))?;
+    if data.len() != expected_len {
         return Err(ClustorError::InvalidArg(
             "X data length does not match shape".into(),
         ));
@@ -45,34 +48,136 @@ fn maybe_normalize_input(data: &mut [f64], n_samples: usize, n_features: usize) 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn region_query(
+fn region_query_euclidean(
     i: usize,
     data: &[f64],
-    data_norms: Option<&[f64]>,
     n_samples: usize,
     n_features: usize,
-    metric: Metric,
-    eps: f64,
     eps_sq: f64,
-) -> Vec<usize> {
+    out: &mut Vec<usize>,
+) {
+    out.clear();
     let xi = &data[i * n_features..(i + 1) * n_features];
-    let mut neigh = Vec::new();
     for j in 0..n_samples {
         let xj = &data[j * n_features..(j + 1) * n_features];
-        let ok = match metric {
-            Metric::Euclidean => euclidean_sq(xi, xj) <= eps_sq,
-            Metric::Cosine => {
-                let ni = data_norms.unwrap()[i];
-                let nj = data_norms.unwrap()[j];
-                cosine_distance(xi, ni, xj, nj) <= eps
-            }
-        };
-        if ok {
-            neigh.push(j);
+        if euclidean_sq(xi, xj) <= eps_sq {
+            out.push(j);
         }
     }
-    neigh
+}
+
+fn region_query_cosine(
+    i: usize,
+    data: &[f64],
+    norms: &[f64],
+    n_samples: usize,
+    n_features: usize,
+    eps: f64,
+    out: &mut Vec<usize>,
+) {
+    out.clear();
+    let xi = &data[i * n_features..(i + 1) * n_features];
+    let ni = norms[i];
+    for j in 0..n_samples {
+        let xj = &data[j * n_features..(j + 1) * n_features];
+        if cosine_distance(xi, ni, xj, norms[j]) <= eps {
+            out.push(j);
+        }
+    }
+}
+
+fn fit_dbscan_with_region_query<F>(
+    n_samples: usize,
+    params: &DbscanParams,
+    mut region_query: F,
+) -> DbscanOutput
+where
+    F: FnMut(usize, &mut Vec<usize>),
+{
+    // labels: -99 = unvisited, -1 = noise, >=0 cluster id
+    let mut labels = vec![-99i64; n_samples];
+    let mut is_core = vec![false; n_samples];
+
+    // Deduplicate queued seeds per cluster using an epoch marker vector.
+    let mut seed_marks = vec![0u32; n_samples];
+    let mut current_mark = 1u32;
+
+    let mut neighbors = Vec::with_capacity(n_samples);
+    let mut seeds = Vec::with_capacity(n_samples);
+
+    let mut cluster_id: i64 = 0;
+    for i in 0..n_samples {
+        if labels[i] != -99 {
+            continue;
+        }
+
+        region_query(i, &mut neighbors);
+        if neighbors.len() < params.min_samples {
+            labels[i] = -1;
+            continue;
+        }
+
+        labels[i] = cluster_id;
+        is_core[i] = true;
+
+        seeds.clear();
+        seeds.extend_from_slice(&neighbors);
+
+        for &p in &seeds {
+            seed_marks[p] = current_mark;
+        }
+
+        let mut idx = 0usize;
+        while idx < seeds.len() {
+            let p = seeds[idx];
+            idx += 1;
+
+            if labels[p] == -1 {
+                labels[p] = cluster_id;
+            }
+            if labels[p] != -99 {
+                continue;
+            }
+            labels[p] = cluster_id;
+
+            region_query(p, &mut neighbors);
+            if neighbors.len() >= params.min_samples {
+                is_core[p] = true;
+                for &q in &neighbors {
+                    if labels[q] == -1 {
+                        labels[q] = cluster_id;
+                    } else if labels[q] == -99 && seed_marks[q] != current_mark {
+                        seed_marks[q] = current_mark;
+                        seeds.push(q);
+                    }
+                }
+            }
+        }
+
+        current_mark = current_mark.wrapping_add(1);
+        if current_mark == 0 {
+            seed_marks.fill(0);
+            current_mark = 1;
+        }
+
+        if params.verbose {
+            eprintln!("[Clustor][DBSCAN] formed cluster {}", cluster_id);
+        }
+        cluster_id += 1;
+    }
+
+    let n_clusters = cluster_id.max(0) as usize;
+    let core_sample_indices = is_core
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &b)| if b && labels[i] >= 0 { Some(i) } else { None })
+        .collect();
+
+    DbscanOutput {
+        labels,
+        core_sample_indices,
+        n_clusters,
+    }
 }
 
 pub fn fit_dbscan(
@@ -95,86 +200,68 @@ pub fn fit_dbscan(
     if params.metric == Metric::Cosine && params.normalize_input {
         maybe_normalize_input(&mut data, n_samples, n_features);
     }
-    let data_norms = if params.metric == Metric::Cosine {
-        Some(compute_row_norms(&data, n_samples, n_features))
-    } else {
-        None
+
+    let out = match params.metric {
+        Metric::Euclidean => {
+            let eps_sq = params.eps * params.eps;
+            fit_dbscan_with_region_query(n_samples, params, |i, out| {
+                region_query_euclidean(i, &data, n_samples, n_features, eps_sq, out)
+            })
+        }
+        Metric::Cosine => {
+            let data_norms = compute_row_norms(&data, n_samples, n_features);
+            fit_dbscan_with_region_query(n_samples, params, |i, out| {
+                region_query_cosine(
+                    i,
+                    &data,
+                    &data_norms,
+                    n_samples,
+                    n_features,
+                    params.eps,
+                    out,
+                )
+            })
+        }
     };
 
-    let eps_sq = params.eps * params.eps;
-    // labels: -99 = unvisited, -1 = noise, >=0 cluster id
-    let mut labels = vec![-99i64; n_samples];
-    let mut is_core = vec![false; n_samples];
+    Ok(out)
+}
 
-    let mut cluster_id: i64 = 0;
-    for i in 0..n_samples {
-        if labels[i] != -99 {
-            continue;
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        let neigh = region_query(
-            i,
-            &data,
-            data_norms.as_deref(),
-            n_samples,
-            n_features,
-            params.metric,
-            params.eps,
-            eps_sq,
-        );
-        if neigh.len() < params.min_samples {
-            labels[i] = -1;
-            continue;
-        }
+    #[test]
+    fn dbscan_rejects_overflowing_shape_product() {
+        let params = DbscanParams {
+            eps: 0.5,
+            min_samples: 2,
+            metric: Metric::Euclidean,
+            normalize_input: false,
+            verbose: false,
+        };
 
-        labels[i] = cluster_id;
-        is_core[i] = true;
-        let mut seeds = neigh;
-        let mut idx = 0usize;
-        while idx < seeds.len() {
-            let p = seeds[idx];
-            idx += 1;
-
-            if labels[p] == -1 {
-                labels[p] = cluster_id;
-            }
-            if labels[p] != -99 {
-                continue;
-            }
-            labels[p] = cluster_id;
-
-            let neigh_p = region_query(
-                p,
-                &data,
-                data_norms.as_deref(),
-                n_samples,
-                n_features,
-                params.metric,
-                params.eps,
-                eps_sq,
-            );
-            if neigh_p.len() >= params.min_samples {
-                is_core[p] = true;
-                seeds.extend(neigh_p);
-            }
-        }
-
-        if params.verbose {
-            eprintln!("[Clustor][DBSCAN] formed cluster {}", cluster_id);
-        }
-        cluster_id += 1;
+        let err = fit_dbscan(&[], usize::MAX, 2, &params).unwrap_err();
+        let ClustorError::InvalidArg(msg) = err;
+        assert!(msg.contains("overflows"));
     }
 
-    let n_clusters = cluster_id.max(0) as usize;
-    let core_sample_indices = is_core
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &b)| if b && labels[i] >= 0 { Some(i) } else { None })
-        .collect();
+    #[test]
+    fn dbscan_relabels_noise_when_density_reachable() {
+        // point 0 is visited first and is not a core sample on its own,
+        // but must be relabeled when expanded from point 1.
+        let data = vec![-0.14, 0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.0];
+        let params = DbscanParams {
+            eps: 0.15,
+            min_samples: 4,
+            metric: Metric::Euclidean,
+            normalize_input: false,
+            verbose: false,
+        };
 
-    Ok(DbscanOutput {
-        labels,
-        core_sample_indices,
-        n_clusters,
-    })
+        let out = fit_dbscan(&data, 4, 2, &params).expect("dbscan should succeed");
+        assert_eq!(out.n_clusters, 1);
+        assert!(out.labels.iter().all(|&v| v == out.labels[0]));
+        assert_ne!(out.labels[0], -1);
+    }
 }

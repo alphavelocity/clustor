@@ -186,6 +186,51 @@ def test_dbscan_invalid_params():
         clustor.DBSCAN(eps=0.1, min_samples=0)
 
 
+def test_dbscan_noise_point_is_relabelled_when_reachable_public_api():
+    # Public API regression for traversal-order relabeling semantics.
+    X = np.array(
+        [
+            [-0.14, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.1],
+            [0.1, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    db = clustor.DBSCAN(eps=0.15, min_samples=4)
+    out = db.fit(X)
+    labels = out["labels"]
+
+    assert out["n_clusters"] == 1
+    assert np.all(labels == labels[0])
+    assert labels[0] != -1
+
+
+def test_dbscan_cosine_with_normalization_clusters_parallel_vectors():
+    X = np.array(
+        [
+            [1.0, 0.0],
+            [10.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 5.0],
+        ],
+        dtype=np.float64,
+    )
+    db = clustor.DBSCAN(
+        eps=1e-8,
+        min_samples=2,
+        metric="cosine",
+        normalize_input=True,
+    )
+    out = db.fit(X)
+    labels = out["labels"]
+
+    assert out["n_clusters"] == 2
+    assert labels[0] == labels[1]
+    assert labels[2] == labels[3]
+    assert labels[0] != labels[2]
+
+
 def test_gmm_invalid_params():
     X = np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float64)
     with pytest.raises(ValueError):
