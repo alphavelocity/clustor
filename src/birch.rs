@@ -8,6 +8,7 @@ use crate::errors::{ClustorError, ClustorResult};
 use crate::kmeans::{KMeansParams, fit_kmeans};
 use crate::metrics::Metric;
 use crate::metrics::euclidean_sq;
+use crate::utils::validate_data_shape;
 
 #[derive(Clone, Debug)]
 struct CfEntry {
@@ -132,9 +133,13 @@ fn validate_inputs(
     if n_features == 0 {
         return Err(ClustorError::InvalidArg("n_features must be > 0".into()));
     }
-    if data.len() != n_samples * n_features {
-        return Err(ClustorError::InvalidArg("data length mismatch".into()));
-    }
+    validate_data_shape(
+        data.len(),
+        n_samples,
+        n_features,
+        "data length mismatch",
+        "shape product overflows usize",
+    )?;
     if params.threshold <= 0.0 || !params.threshold.is_finite() {
         return Err(ClustorError::InvalidArg(
             "threshold must be finite and > 0".into(),

@@ -10,7 +10,7 @@ use rand::rngs::StdRng;
 
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::Metric;
-use crate::utils::kmeans_plus_plus;
+use crate::utils::{kmeans_plus_plus, validate_data_shape};
 
 const LOG_2PI: f64 = 1.8378770664093453; // ln(2*pi)
 
@@ -47,11 +47,13 @@ fn validate_inputs(
             "X must be non-empty 2D array".into(),
         ));
     }
-    if data.len() != n_samples * n_features {
-        return Err(ClustorError::InvalidArg(
-            "X data length does not match shape".into(),
-        ));
-    }
+    validate_data_shape(
+        data.len(),
+        n_samples,
+        n_features,
+        "X data length does not match shape",
+        "X shape product overflows usize",
+    )?;
     if k == 0 {
         return Err(ClustorError::InvalidArg("n_components must be > 0".into()));
     }

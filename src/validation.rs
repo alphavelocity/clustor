@@ -6,7 +6,7 @@
 
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::{Metric, cosine_distance};
-use crate::utils::compute_row_norms;
+use crate::utils::{compute_row_norms, validate_data_shape};
 use std::collections::HashMap;
 
 fn validate(
@@ -18,12 +18,13 @@ fn validate(
     if n_samples == 0 || n_features == 0 {
         return Err(ClustorError::InvalidArg("X must be non-empty".into()));
     }
-    let expected_len = n_samples
-        .checked_mul(n_features)
-        .ok_or_else(|| ClustorError::InvalidArg("Input too large".into()))?;
-    if data.len() != expected_len {
-        return Err(ClustorError::InvalidArg("X length mismatch".into()));
-    }
+    validate_data_shape(
+        data.len(),
+        n_samples,
+        n_features,
+        "X length mismatch",
+        "Input too large",
+    )?;
     if labels.len() != n_samples {
         return Err(ClustorError::InvalidArg("labels length mismatch".into()));
     }

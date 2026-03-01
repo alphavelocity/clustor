@@ -6,7 +6,7 @@
 
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::{Metric, cosine_distance, euclidean_sq};
-use crate::utils::compute_row_norms;
+use crate::utils::{compute_row_norms, validate_data_shape};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Linkage {
@@ -35,9 +35,13 @@ fn validate_inputs(data: &[f64], n_samples: usize, n_features: usize) -> Clustor
     if n_features == 0 {
         return Err(ClustorError::InvalidArg("n_features must be > 0".into()));
     }
-    if data.len() != n_samples * n_features {
-        return Err(ClustorError::InvalidArg("data length mismatch".into()));
-    }
+    validate_data_shape(
+        data.len(),
+        n_samples,
+        n_features,
+        "data length mismatch",
+        "shape product overflows usize",
+    )?;
     Ok(())
 }
 

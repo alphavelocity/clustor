@@ -5,7 +5,25 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::metrics::{Metric, cosine_distance, euclidean_sq, l2_norm};
+use crate::{errors::ClustorError, errors::ClustorResult};
 use rand::RngExt;
+
+#[inline]
+pub fn validate_data_shape(
+    data_len: usize,
+    n_samples: usize,
+    n_features: usize,
+    mismatch_msg: &'static str,
+    overflow_msg: &'static str,
+) -> ClustorResult<()> {
+    let expected = n_samples
+        .checked_mul(n_features)
+        .ok_or_else(|| ClustorError::InvalidArg(overflow_msg.into()))?;
+    if data_len != expected {
+        return Err(ClustorError::InvalidArg(mismatch_msg.into()));
+    }
+    Ok(())
+}
 
 pub fn compute_row_norms(data: &[f64], n_samples: usize, n_features: usize) -> Vec<f64> {
     let mut norms = Vec::with_capacity(n_samples);
@@ -133,7 +151,8 @@ pub fn kmeans_plus_plus<R: RngExt>(
 
 #[cfg(test)]
 mod tests {
-    use super::sample_weighted_index;
+    use super::{sample_weighted_index, validate_data_shape};
+    use crate::errors::ClustorError;
     use rand::SeedableRng;
 
     #[test]
@@ -152,5 +171,25 @@ mod tests {
             let idx = sample_weighted_index(&mut rng, &[f64::NAN, 1.0, 2.0]);
             assert!(idx < 3);
         }
+    }
+
+    #[test]
+    fn validate_data_shape_rejects_overflowing_shape_product() {
+        let err = validate_data_shape(0, usize::MAX, 2, "mismatch", "overflow")
+            .expect_err("overflow should be rejected");
+        assert!(matches!(err, ClustorError::InvalidArg(msg) if msg == "overflow"));
+    }
+
+    #[test]
+    fn validate_data_shape_rejects_mismatched_length() {
+        let err = validate_data_shape(11, 3, 4, "mismatch", "overflow")
+            .expect_err("mismatch should be rejected");
+        assert!(matches!(err, ClustorError::InvalidArg(msg) if msg == "mismatch"));
+    }
+
+    #[test]
+    fn validate_data_shape_accepts_matching_product() {
+        let out = validate_data_shape(12, 3, 4, "mismatch", "overflow");
+        assert!(out.is_ok());
     }
 }

@@ -6,7 +6,7 @@
 
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::{Metric, cosine_distance, euclidean_sq, normalize_in_place};
-use crate::utils::compute_row_norms;
+use crate::utils::{compute_row_norms, validate_data_shape};
 
 #[derive(Clone, Debug)]
 pub struct DbscanOutput {
@@ -30,14 +30,13 @@ fn validate_inputs(data: &[f64], n_samples: usize, n_features: usize) -> Clustor
             "X must be non-empty 2D array".into(),
         ));
     }
-    let expected_len = n_samples
-        .checked_mul(n_features)
-        .ok_or_else(|| ClustorError::InvalidArg("X shape product overflows usize".into()))?;
-    if data.len() != expected_len {
-        return Err(ClustorError::InvalidArg(
-            "X data length does not match shape".into(),
-        ));
-    }
+    validate_data_shape(
+        data.len(),
+        n_samples,
+        n_features,
+        "X data length does not match shape",
+        "X shape product overflows usize",
+    )?;
     Ok(())
 }
 

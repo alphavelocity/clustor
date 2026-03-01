@@ -12,7 +12,7 @@ use std::borrow::Cow;
 
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::{Metric, cosine_distance, euclidean_sq, l2_norm, normalize_in_place};
-use crate::utils::{compute_row_norms, kmeans_plus_plus, pick_random_index};
+use crate::utils::{compute_row_norms, kmeans_plus_plus, pick_random_index, validate_data_shape};
 
 #[derive(Clone, Debug)]
 pub struct FitOutput {
@@ -46,11 +46,13 @@ fn validate_inputs(
             "X must be non-empty 2D array".into(),
         ));
     }
-    if data.len() != n_samples * n_features {
-        return Err(ClustorError::InvalidArg(
-            "X data length does not match shape".into(),
-        ));
-    }
+    validate_data_shape(
+        data.len(),
+        n_samples,
+        n_features,
+        "X data length does not match shape",
+        "X shape product overflows usize",
+    )?;
     if k == 0 {
         return Err(ClustorError::InvalidArg("n_clusters must be > 0".into()));
     }
@@ -431,9 +433,13 @@ pub fn minibatch_partial_fit(
             "feature dimension mismatch".into(),
         ));
     }
-    if batch_in.len() != n_samples * n_features {
-        return Err(ClustorError::InvalidArg("batch length mismatch".into()));
-    }
+    validate_data_shape(
+        batch_in.len(),
+        n_samples,
+        n_features,
+        "batch length mismatch",
+        "batch shape product overflows usize",
+    )?;
 
     let mut center_norms: Option<Vec<f64>> = None;
     if state.metric == Metric::Cosine {
@@ -586,4 +592,29 @@ pub fn minibatch_fit(
         n_iter: params.max_steps,
     };
     Ok((state, out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MiniBatchState, minibatch_partial_fit};
+    use crate::errors::ClustorError;
+    use crate::metrics::Metric;
+
+    #[test]
+    fn minibatch_partial_fit_rejects_overflowing_batch_shape_product() {
+        let mut state = MiniBatchState {
+            centers: vec![0.0, 0.0],
+            counts: vec![0],
+            n_features: 2,
+            metric: Metric::Euclidean,
+            normalize_centers: false,
+            normalize_input: false,
+        };
+        let err = minibatch_partial_fit(&mut state, &[], usize::MAX, 2, false, false)
+            .expect_err("overflow should be rejected");
+        assert!(matches!(
+            err,
+            ClustorError::InvalidArg(msg) if msg == "batch shape product overflows usize"
+        ));
+    }
 }

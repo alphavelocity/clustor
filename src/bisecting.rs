@@ -12,7 +12,7 @@ use rand::seq::SliceRandom;
 use crate::errors::{ClustorError, ClustorResult};
 use crate::kmeans::{KMeansParams, fit_kmeans};
 use crate::metrics::{Metric, cosine_distance, euclidean_sq, l2_norm, normalize_in_place};
-use crate::utils::compute_row_norms;
+use crate::utils::{compute_row_norms, validate_data_shape};
 
 #[derive(Clone, Debug)]
 pub struct BisectingParams {
@@ -46,11 +46,13 @@ fn validate_inputs(
             "X must be non-empty 2D array".into(),
         ));
     }
-    if data.len() != n_samples * n_features {
-        return Err(ClustorError::InvalidArg(
-            "X data length does not match shape".into(),
-        ));
-    }
+    validate_data_shape(
+        data.len(),
+        n_samples,
+        n_features,
+        "X data length does not match shape",
+        "X shape product overflows usize",
+    )?;
     if k == 0 {
         return Err(ClustorError::InvalidArg("n_clusters must be > 0".into()));
     }

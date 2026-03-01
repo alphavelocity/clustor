@@ -6,7 +6,7 @@
 
 use crate::errors::{ClustorError, ClustorResult};
 use crate::metrics::{Metric, cosine_distance, euclidean_sq, normalize_in_place};
-use crate::utils::compute_row_norms;
+use crate::utils::{compute_row_norms, validate_data_shape};
 
 #[derive(Clone, Debug)]
 pub struct AffinityParams {
@@ -39,9 +39,13 @@ fn validate_inputs(
     if n_features == 0 {
         return Err(ClustorError::InvalidArg("n_features must be > 0".into()));
     }
-    if data.len() != n_samples * n_features {
-        return Err(ClustorError::InvalidArg("data length mismatch".into()));
-    }
+    validate_data_shape(
+        data.len(),
+        n_samples,
+        n_features,
+        "data length mismatch",
+        "shape product overflows usize",
+    )?;
     if !(0.5..1.0).contains(&params.damping) {
         return Err(ClustorError::InvalidArg(
             "damping must be in [0.5, 1.0)".into(),
