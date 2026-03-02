@@ -85,29 +85,47 @@ fn assign_labels(
     labels: &mut [usize],
 ) -> f64 {
     let mut inertia = 0.0;
-    for i in 0..n_samples {
-        let x = &data[i * n_features..(i + 1) * n_features];
-        let mut best_k = 0usize;
-        let mut best_d = f64::INFINITY;
-        for c in 0..k {
-            let cent = &centers[c * n_features..(c + 1) * n_features];
-            let d = match metric {
-                Metric::Euclidean => euclidean_sq(x, cent),
-                Metric::Cosine => {
-                    let xn = data_norms.unwrap()[i];
-                    let cn = center_norms.unwrap()[c];
-                    let cd = cosine_distance(x, xn, cent, cn);
-                    cd * cd
+    match metric {
+        Metric::Euclidean => {
+            for i in 0..n_samples {
+                let x = &data[i * n_features..(i + 1) * n_features];
+                let mut best_k = 0usize;
+                let mut best_d = f64::INFINITY;
+                for c in 0..k {
+                    let cent = &centers[c * n_features..(c + 1) * n_features];
+                    let d = euclidean_sq(x, cent);
+                    if d < best_d {
+                        best_d = d;
+                        best_k = c;
+                    }
                 }
-            };
-            if d < best_d {
-                best_d = d;
-                best_k = c;
+            labels[i] = best_k;
+                let w = sample_weight.map_or(1.0, |sw| sw[i]);
+                inertia += best_d * w;
             }
         }
-        labels[i] = best_k;
-        let w = sample_weight.map(|sw| sw[i]).unwrap_or(1.0);
-        inertia += best_d * w;
+        Metric::Cosine => {
+            let data_norms = data_norms.expect("data norms are required for cosine metric");
+            let center_norms = center_norms.expect("center norms are required for cosine metric");
+            for i in 0..n_samples {
+                let x = &data[i * n_features..(i + 1) * n_features];
+                let xn = data_norms[i];
+                let mut best_k = 0usize;
+                let mut best_d = f64::INFINITY;
+                for c in 0..k {
+                    let cent = &centers[c * n_features..(c + 1) * n_features];
+                    let cd = cosine_distance(x, xn, cent, center_norms[c]);
+                    let d = cd * cd;
+                    if d < best_d {
+                        best_d = d;
+                        best_k = c;
+                    }
+                }
+                labels[i] = best_k;
+                let w = sample_weight.map_or(1.0, |sw| sw[i]);
+                inertia += best_d * w;
+            }
+        }
     }
     inertia
 }
@@ -415,6 +433,27 @@ pub fn minibatch_init(
     })
 }
 
+#[inline]
+fn increment_count_and_eta(count: &mut u64) -> ClustorResult<f64> {
+    *count = count
+        .checked_add(1)
+        .ok_or_else(|| ClustorError::InvalidArg("mini-batch update count overflow".into()))?;
+    Ok(1.0 / (*count as f64))
+}
+
+#[inline]
+fn apply_online_update(center: &mut [f64], x: &[f64], eta: f64) {
+    if eta == 1.0 {
+        center.copy_from_slice(x);
+        return;
+    }
+
+    let one_minus_eta = 1.0 - eta;
+    for (c, &xj) in center.iter_mut().zip(x.iter()) {
+        *c = one_minus_eta * *c + eta * xj;
+    }
+}
+
 pub fn minibatch_partial_fit(
     state: &mut MiniBatchState,
     batch_in: &[f64],
@@ -433,6 +472,18 @@ pub fn minibatch_partial_fit(
             "feature dimension mismatch".into(),
         ));
     }
+    if state.counts.is_empty() {
+        return Err(ClustorError::InvalidArg(
+            "MiniBatchState has no clusters; call fit() first".into(),
+        ));
+    }
+    validate_data_shape(
+        state.centers.len(),
+        state.counts.len(),
+        n_features,
+        "MiniBatchState centers length does not match counts and n_features",
+        "MiniBatchState shape product overflows usize",
+    )?;
     validate_data_shape(
         batch_in.len(),
         n_samples,
@@ -441,60 +492,85 @@ pub fn minibatch_partial_fit(
         "batch shape product overflows usize",
     )?;
 
-    let mut center_norms: Option<Vec<f64>> = None;
-    if state.metric == Metric::Cosine {
-        let mut cn = Vec::with_capacity(state.counts.len());
-        for c in 0..state.counts.len() {
-            cn.push(l2_norm(
-                &state.centers[c * n_features..(c + 1) * n_features],
-            ));
+    if n_samples == 0 {
+        if verbose {
+            eprintln!("[Clustor][MiniBatch] partial_fit batch_n=0");
         }
-        center_norms = Some(cn);
+        return Ok(());
     }
 
-    let data = if state.metric == Metric::Cosine && state.normalize_input && !input_pre_normalized {
-        let mut normalized_batch = batch_in.to_vec();
-        maybe_normalize_input(&mut normalized_batch, n_samples, n_features);
-        Cow::Owned(normalized_batch)
-    } else {
-        Cow::Borrowed(batch_in)
-    };
+    let k = state.counts.len();
 
-    let x_norms = if state.metric == Metric::Cosine {
-        Some(compute_row_norms(&data, n_samples, n_features))
-    } else {
-        None
-    };
-
-    for i in 0..n_samples {
-        let x = &data[i * n_features..(i + 1) * n_features];
-        let mut best_k = 0usize;
-        let mut best_d = f64::INFINITY;
-        for c in 0..state.counts.len() {
-            let cent = &state.centers[c * n_features..(c + 1) * n_features];
-            let d = match state.metric {
-                Metric::Euclidean => euclidean_sq(x, cent),
-                Metric::Cosine => {
-                    let xn = x_norms.as_ref().unwrap()[i];
-                    let cn = center_norms.as_ref().unwrap()[c];
-                    let cd = cosine_distance(x, xn, cent, cn);
-                    cd * cd
+    match state.metric {
+        Metric::Euclidean => {
+            for i in 0..n_samples {
+                let x = &batch_in[i * n_features..(i + 1) * n_features];
+                let mut best_k = 0usize;
+                let mut best_d = f64::INFINITY;
+                for c in 0..k {
+                    let cent = &state.centers[c * n_features..(c + 1) * n_features];
+                    let d = euclidean_sq(x, cent);
+                    if d < best_d {
+                        best_d = d;
+                        best_k = c;
+                    }
                 }
-            };
-            if d < best_d {
-                best_d = d;
-                best_k = c;
+
+                let eta = increment_count_and_eta(&mut state.counts[best_k])?;
+                let cent = &mut state.centers[best_k * n_features..(best_k + 1) * n_features];
+                apply_online_update(cent, x, eta);
             }
         }
+        Metric::Cosine => {
+            let data = if state.normalize_input && !input_pre_normalized {
+                let mut normalized_batch = batch_in.to_vec();
+                maybe_normalize_input(&mut normalized_batch, n_samples, n_features);
+                Cow::Owned(normalized_batch)
+            } else {
+                Cow::Borrowed(batch_in)
+            };
+            let x_norms = compute_row_norms(&data, n_samples, n_features);
 
-        state.counts[best_k] += 1;
-        let eta = 1.0 / (state.counts[best_k] as f64);
-        let cent = &mut state.centers[best_k * n_features..(best_k + 1) * n_features];
-        for j in 0..n_features {
-            cent[j] = (1.0 - eta) * cent[j] + eta * x[j];
-        }
-        if state.metric == Metric::Cosine && state.normalize_centers {
-            normalize_in_place(cent);
+            let mut center_norms = Vec::with_capacity(k);
+            for c in 0..k {
+                center_norms.push(l2_norm(
+                    &state.centers[c * n_features..(c + 1) * n_features],
+                ));
+            }
+
+            for i in 0..n_samples {
+                let x = &data[i * n_features..(i + 1) * n_features];
+                let xn = x_norms[i];
+                let mut best_k = 0usize;
+                let mut best_d = f64::INFINITY;
+                for (c, &cn) in center_norms.iter().enumerate() {
+                    let cent = &state.centers[c * n_features..(c + 1) * n_features];
+                    let cd = cosine_distance(x, xn, cent, cn);
+                    let d = cd * cd;
+                    if d < best_d {
+                        best_d = d;
+                        best_k = c;
+                    }
+                }
+
+                let eta = increment_count_and_eta(&mut state.counts[best_k])?;
+                let cent = &mut state.centers[best_k * n_features..(best_k + 1) * n_features];
+                apply_online_update(cent, x, eta);
+
+                // Keep norms in sync with online center updates so subsequent
+                // cosine assignments use up-to-date distances. When center
+                // normalization is requested, update both vector and norm in
+                // one flow to avoid extra passes.
+                let mut center_norm = l2_norm(cent);
+                if state.normalize_centers && center_norm > 0.0 {
+                    let inv = 1.0 / center_norm;
+                    for v in cent.iter_mut() {
+                        *v *= inv;
+                    }
+                    center_norm = 1.0;
+                }
+                center_norms[best_k] = center_norm;
+            }
         }
     }
 
@@ -599,6 +675,216 @@ mod tests {
     use super::{MiniBatchState, minibatch_partial_fit};
     use crate::errors::ClustorError;
     use crate::metrics::Metric;
+
+    #[test]
+    fn minibatch_partial_fit_keeps_cosine_norms_in_sync_with_center_updates() {
+        let mut state = MiniBatchState {
+            centers: vec![
+                0.680_984_745_370_125_2,
+                -0.019_520_545_505_002_04,
+                1.200_350_624_692_628,
+                -1.084_702_881_793_631_5,
+            ],
+            counts: vec![1, 1],
+            n_features: 2,
+            metric: Metric::Cosine,
+            normalize_centers: false,
+            normalize_input: false,
+        };
+
+        let batch = vec![
+            -1.035_251_536_998_467_6,
+            0.375_549_077_280_286_97,
+            0.354_005_054_143_552_2,
+            -1.741_967_397_144_093_4,
+        ];
+
+        minibatch_partial_fit(&mut state, &batch, 2, 2, false, false)
+            .expect("cosine minibatch partial_fit should succeed");
+
+        assert_eq!(state.counts, vec![1, 3]);
+    }
+
+    #[test]
+    fn minibatch_partial_fit_first_update_sets_center_exactly() {
+        let mut state = MiniBatchState {
+            centers: vec![10.0, -7.0],
+            counts: vec![0],
+            n_features: 2,
+            metric: Metric::Euclidean,
+            normalize_centers: false,
+            normalize_input: false,
+        };
+
+        let batch = vec![3.5, -2.25];
+        minibatch_partial_fit(&mut state, &batch, 1, 2, false, false)
+            .expect("first update should succeed");
+
+        assert_eq!(state.centers, batch);
+        assert_eq!(state.counts, vec![1]);
+    }
+
+    #[test]
+    fn minibatch_partial_fit_first_cosine_update_normalizes_when_enabled() {
+        let mut state = MiniBatchState {
+            centers: vec![0.0, 0.0],
+            counts: vec![0],
+            n_features: 2,
+            metric: Metric::Cosine,
+            normalize_centers: true,
+            normalize_input: false,
+        };
+
+        let batch = vec![3.0, 4.0];
+        minibatch_partial_fit(&mut state, &batch, 1, 2, false, false)
+            .expect("first cosine update should succeed");
+
+        assert!((state.centers[0] - 0.6).abs() < 1e-12);
+        assert!((state.centers[1] - 0.8).abs() < 1e-12);
+        assert_eq!(state.counts, vec![1]);
+    }
+
+    #[test]
+    fn minibatch_partial_fit_normalizes_cosine_centers_when_enabled() {
+        let mut state = MiniBatchState {
+            centers: vec![2.0, 0.0],
+            counts: vec![0],
+            n_features: 2,
+            metric: Metric::Cosine,
+            normalize_centers: true,
+            normalize_input: false,
+        };
+
+        let batch = vec![3.0, 4.0];
+        minibatch_partial_fit(&mut state, &batch, 1, 2, false, false)
+            .expect("cosine minibatch partial_fit should succeed");
+
+        let c0 = state.centers[0];
+        let c1 = state.centers[1];
+        let norm = (c0 * c0 + c1 * c1).sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-12,
+            "center norm should be 1, got {norm}"
+        );
+    }
+
+    #[test]
+    fn minibatch_partial_fit_rejects_count_overflow() {
+        let mut state = MiniBatchState {
+            centers: vec![0.0, 0.0],
+            counts: vec![u64::MAX],
+            n_features: 2,
+            metric: Metric::Euclidean,
+            normalize_centers: false,
+            normalize_input: false,
+        };
+
+        let batch = vec![1.0, 2.0];
+        let err = minibatch_partial_fit(&mut state, &batch, 1, 2, false, false)
+            .expect_err("count overflow should be rejected");
+        assert!(matches!(
+            err,
+            ClustorError::InvalidArg(msg) if msg == "mini-batch update count overflow"
+        ));
+    }
+
+    #[test]
+    fn minibatch_partial_fit_rejects_count_overflow_for_cosine() {
+        let mut state = MiniBatchState {
+            centers: vec![1.0, 0.0],
+            counts: vec![u64::MAX],
+            n_features: 2,
+            metric: Metric::Cosine,
+            normalize_centers: false,
+            normalize_input: false,
+        };
+
+        let batch = vec![1.0, 0.0];
+        let err = minibatch_partial_fit(&mut state, &batch, 1, 2, false, false)
+            .expect_err("count overflow should be rejected for cosine");
+        assert!(matches!(
+            err,
+            ClustorError::InvalidArg(msg) if msg == "mini-batch update count overflow"
+        ));
+    }
+
+    #[test]
+    fn minibatch_partial_fit_is_noop_for_empty_batch() {
+        let original_centers = vec![1.0, 2.0, 3.0, 4.0];
+        let original_counts = vec![5, 6];
+        let mut state = MiniBatchState {
+            centers: original_centers.clone(),
+            counts: original_counts.clone(),
+            n_features: 2,
+            metric: Metric::Cosine,
+            normalize_centers: true,
+            normalize_input: true,
+        };
+
+        minibatch_partial_fit(&mut state, &[], 0, 2, false, true)
+            .expect("empty batch should be a no-op");
+
+        assert_eq!(state.centers, original_centers);
+        assert_eq!(state.counts, original_counts);
+    }
+
+    #[test]
+    fn minibatch_partial_fit_rejects_uninitialized_state() {
+        let mut state = MiniBatchState {
+            centers: vec![],
+            counts: vec![0],
+            n_features: 2,
+            metric: Metric::Euclidean,
+            normalize_centers: false,
+            normalize_input: false,
+        };
+
+        let err = minibatch_partial_fit(&mut state, &[], 0, 2, false, false)
+            .expect_err("uninitialized state should be rejected");
+        assert!(matches!(
+            err,
+            ClustorError::InvalidArg(msg) if msg == "MiniBatchState not initialized; call fit() first"
+        ));
+    }
+
+    #[test]
+    fn minibatch_partial_fit_rejects_empty_counts() {
+        let mut state = MiniBatchState {
+            centers: vec![0.0, 0.0],
+            counts: vec![],
+            n_features: 2,
+            metric: Metric::Euclidean,
+            normalize_centers: false,
+            normalize_input: false,
+        };
+
+        let err = minibatch_partial_fit(&mut state, &[], 0, 2, false, false)
+            .expect_err("empty counts should be rejected");
+        assert!(matches!(
+            err,
+            ClustorError::InvalidArg(msg) if msg == "MiniBatchState has no clusters; call fit() first"
+        ));
+    }
+
+    #[test]
+    fn minibatch_partial_fit_rejects_malformed_centers_shape() {
+        let mut state = MiniBatchState {
+            centers: vec![0.0, 0.0, 0.0],
+            counts: vec![0, 0],
+            n_features: 2,
+            metric: Metric::Euclidean,
+            normalize_centers: false,
+            normalize_input: false,
+        };
+
+        let err = minibatch_partial_fit(&mut state, &[], 0, 2, false, false)
+            .expect_err("malformed center shape should be rejected");
+        assert!(matches!(
+            err,
+            ClustorError::InvalidArg(msg)
+                if msg == "MiniBatchState centers length does not match counts and n_features"
+        ));
+    }
 
     #[test]
     fn minibatch_partial_fit_rejects_overflowing_batch_shape_product() {
