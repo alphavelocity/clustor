@@ -99,7 +99,7 @@ fn assign_labels(
                         best_k = c;
                     }
                 }
-            labels[i] = best_k;
+                labels[i] = best_k;
                 let w = sample_weight.map_or(1.0, |sw| sw[i]);
                 inertia += best_d * w;
             }
