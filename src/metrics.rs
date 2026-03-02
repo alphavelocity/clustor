@@ -12,10 +12,13 @@ pub enum Metric {
 
 impl Metric {
     pub fn parse(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "euclidean" | "l2" => Some(Metric::Euclidean),
-            "cosine" => Some(Metric::Cosine),
-            _ => None,
+        let bytes = s.as_bytes();
+        if bytes.eq_ignore_ascii_case(b"l2") || bytes.eq_ignore_ascii_case(b"euclidean") {
+            Some(Metric::Euclidean)
+        } else if bytes.eq_ignore_ascii_case(b"cosine") {
+            Some(Metric::Cosine)
+        } else {
+            None
         }
     }
 }
@@ -91,7 +94,26 @@ pub fn normalize_in_place(v: &mut [f64]) {
 
 #[cfg(test)]
 mod tests {
-    use super::cosine_distance;
+    use super::{Metric, cosine_distance};
+
+    #[test]
+    fn metric_parse_accepts_aliases_case_insensitively() {
+        assert_eq!(Metric::parse("EUCLIDEAN"), Some(Metric::Euclidean));
+        assert_eq!(Metric::parse("L2"), Some(Metric::Euclidean));
+        assert_eq!(Metric::parse("CoSiNe"), Some(Metric::Cosine));
+    }
+
+    #[test]
+    fn metric_parse_rejects_unknown_values() {
+        assert_eq!(Metric::parse("manhattan"), None);
+        assert_eq!(Metric::parse(""), None);
+        assert_eq!(Metric::parse(" euclidean"), None);
+    }
+
+    #[test]
+    fn metric_parse_rejects_non_ascii_confusables() {
+        assert_eq!(Metric::parse("cоsine"), None); // Cyrillic small o
+    }
 
     #[test]
     fn cosine_distance_handles_zero_vectors() {

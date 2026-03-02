@@ -672,9 +672,32 @@ pub fn minibatch_fit(
 
 #[cfg(test)]
 mod tests {
-    use super::{MiniBatchState, minibatch_partial_fit};
+    use super::{MiniBatchState, assign_labels, minibatch_partial_fit};
     use crate::errors::ClustorError;
     use crate::metrics::Metric;
+
+    #[test]
+    fn assign_labels_euclidean_assigns_each_sample_independently() {
+        let data = vec![0.0, 0.0, 9.0, 9.0];
+        let centers = vec![0.0, 0.0, 10.0, 10.0];
+        let mut labels = vec![usize::MAX; 2];
+
+        let inertia = assign_labels(
+            &data,
+            None,
+            &centers,
+            None,
+            None,
+            2,
+            2,
+            2,
+            Metric::Euclidean,
+            &mut labels,
+        );
+
+        assert_eq!(labels, vec![0, 1]);
+        assert!((inertia - 2.0).abs() < 1e-12);
+    }
 
     #[test]
     fn minibatch_partial_fit_keeps_cosine_norms_in_sync_with_center_updates() {
