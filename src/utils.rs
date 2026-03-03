@@ -46,21 +46,66 @@ fn sample_weighted_index<R: RngExt>(rng: &mut R, weights: &[f64]) -> usize {
         return 0;
     }
 
-    let sum: f64 = weights.iter().sum();
-    if sum <= 0.0 || !sum.is_finite() {
+    let mut max_weight = 0.0;
+    let mut inf_count = 0usize;
+    let mut selected_inf_idx = 0usize;
+    for (i, &w) in weights.iter().enumerate() {
+        if w.is_infinite() && w.is_sign_positive() {
+            inf_count += 1;
+            // Reservoir sampling over +inf entries gives a uniform pick in one pass.
+            if pick_random_index(rng, inf_count) == 0 {
+                selected_inf_idx = i;
+            }
+            continue;
+        }
+        if w.is_finite() && w > max_weight {
+            max_weight = w;
+        }
+    }
+
+    if inf_count > 0 {
+        return selected_inf_idx;
+    }
+
+    if max_weight <= 0.0 {
         return pick_random_index(rng, weights.len());
     }
 
-    let mut r = rng.random_range(0.0..sum);
+    // Scale by the largest positive finite weight to avoid overflow while preserving probabilities.
+    let inv_max_weight = 1.0 / max_weight;
+    let mut scaled_sum = 0.0;
+    for &w in weights {
+        if w.is_finite() && w > 0.0 {
+            scaled_sum += w * inv_max_weight;
+        }
+    }
+
+    if scaled_sum <= 0.0 || !scaled_sum.is_finite() {
+        return pick_random_index(rng, weights.len());
+    }
+
+    let mut r = rng.random_range(0.0..scaled_sum);
+    let mut last_positive_idx = 0usize;
+    let mut saw_positive = false;
     for (i, &w) in weights.iter().enumerate() {
-        if r < w {
+        if !(w.is_finite() && w > 0.0) {
+            continue;
+        }
+        saw_positive = true;
+        last_positive_idx = i;
+        let scaled = w * inv_max_weight;
+        if r < scaled {
             return i;
         }
-        r -= w;
+        r -= scaled;
     }
 
     // Floating-point accumulation can leave a tiny remainder.
-    weights.len() - 1
+    if saw_positive {
+        last_positive_idx
+    } else {
+        pick_random_index(rng, weights.len())
+    }
 }
 
 /// KMeans++ initialization (Arthur & Vassilvitskii, 2007).
@@ -165,11 +210,66 @@ mod tests {
     }
 
     #[test]
-    fn weighted_sampling_returns_in_range_when_sum_invalid() {
+    fn weighted_sampling_ignores_nan_and_non_positive_weights() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(9);
         for _ in 0..64 {
-            let idx = sample_weighted_index(&mut rng, &[f64::NAN, 1.0, 2.0]);
-            assert!(idx < 3);
+            let idx = sample_weighted_index(&mut rng, &[f64::NAN, -1.0, 0.0, 2.0]);
+            assert_eq!(idx, 3);
+        }
+    }
+
+    #[test]
+    fn weighted_sampling_prefers_infinite_weights() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        for _ in 0..64 {
+            let idx = sample_weighted_index(&mut rng, &[1.0, f64::INFINITY, -10.0, f64::INFINITY]);
+            assert!(idx == 1 || idx == 3);
+        }
+    }
+
+    #[test]
+    fn weighted_sampling_infinite_weights_eventually_hits_each_infinite_bucket() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(21);
+        let mut saw_first = false;
+        let mut saw_second = false;
+        for _ in 0..256 {
+            let idx = sample_weighted_index(&mut rng, &[1.0, f64::INFINITY, 3.0, f64::INFINITY]);
+            if idx == 1 {
+                saw_first = true;
+            } else if idx == 3 {
+                saw_second = true;
+            }
+            if saw_first && saw_second {
+                break;
+            }
+        }
+        assert!(saw_first && saw_second);
+    }
+
+    #[test]
+    fn weighted_sampling_ignores_negative_infinity() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12);
+        for _ in 0..64 {
+            let idx = sample_weighted_index(&mut rng, &[f64::NEG_INFINITY, 0.0, 5.0]);
+            assert_eq!(idx, 2);
+        }
+    }
+
+    #[test]
+    fn weighted_sampling_handles_large_finite_weights_without_overflow() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(13);
+        for _ in 0..64 {
+            let idx = sample_weighted_index(&mut rng, &[f64::MAX, f64::MAX, 0.0]);
+            assert!(idx == 0 || idx == 1);
+        }
+    }
+
+    #[test]
+    fn weighted_sampling_returns_in_range_when_no_positive_mass_exists() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(15);
+        for _ in 0..64 {
+            let idx = sample_weighted_index(&mut rng, &[f64::NAN, -1.0, 0.0, f64::NEG_INFINITY]);
+            assert!(idx < 4);
         }
     }
 
