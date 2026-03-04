@@ -41,6 +41,11 @@ fn validate_inputs(
     if n_features == 0 {
         return Err(ClustorError::InvalidArg("n_features must be > 0".into()));
     }
+    if n_samples > i32::MAX as usize {
+        return Err(ClustorError::InvalidArg(
+            "n_samples must be <= i32::MAX".into(),
+        ));
+    }
     validate_data_shape(
         data.len(),
         n_samples,
@@ -63,6 +68,11 @@ fn validate_inputs(
 }
 
 #[inline]
+fn sanitize_distance(d: f64) -> f64 {
+    if d.is_finite() { d } else { f64::INFINITY }
+}
+
+#[inline]
 fn dist(
     data: &[f64],
     norms: Option<&[f64]>,
@@ -73,16 +83,17 @@ fn dist(
 ) -> f64 {
     let a = &data[i * n_features..(i + 1) * n_features];
     let b = &data[j * n_features..(j + 1) * n_features];
-    match metric {
+    let d = match metric {
         Metric::Euclidean => euclidean_sq(a, b).sqrt(),
         Metric::Cosine => {
             let n = norms.expect("norms required for cosine");
             cosine_distance(a, n[i], b, n[j]).max(0.0)
         }
-    }
+    };
+    sanitize_distance(d)
 }
 
-/// Returns neighbor indices and distances (including `p` itself at distance 0.0).
+/// Returns neighbor `(index, distance)` pairs (including `p` itself at distance 0.0).
 fn neighbors_within_eps(
     data: &[f64],
     norms: Option<&[f64]>,
@@ -91,35 +102,79 @@ fn neighbors_within_eps(
     n_features: usize,
     metric: Metric,
     max_eps: f64,
-) -> (Vec<usize>, Vec<f64>) {
-    let mut idxs = Vec::new();
-    let mut ds = Vec::new();
+) -> Vec<(usize, f64)> {
+    let mut neighbors = Vec::with_capacity(n_samples);
 
-    // Always include self
-    idxs.push(p);
-    ds.push(0.0);
+    // Always include self.
+    neighbors.push((p, 0.0));
 
-    let cap = max_eps;
-    for j in 0..n_samples {
-        if j == p {
-            continue;
+    if max_eps == f64::INFINITY {
+        for j in 0..p {
+            let d = dist(data, norms, p, j, n_features, metric);
+            neighbors.push((j, d));
         }
+        for j in (p + 1)..n_samples {
+            let d = dist(data, norms, p, j, n_features, metric);
+            neighbors.push((j, d));
+        }
+        return neighbors;
+    }
+
+    for j in 0..p {
         let d = dist(data, norms, p, j, n_features, metric);
-        if cap == f64::INFINITY || d <= cap {
-            idxs.push(j);
-            ds.push(d);
+        if d <= max_eps {
+            neighbors.push((j, d));
         }
     }
-    (idxs, ds)
+    for j in (p + 1)..n_samples {
+        let d = dist(data, norms, p, j, n_features, metric);
+        if d <= max_eps {
+            neighbors.push((j, d));
+        }
+    }
+    neighbors
 }
 
-fn core_distance_from_dists(mut dists: Vec<f64>, min_samples: usize) -> f64 {
+fn core_distance_from_neighbors(neighbors: &[(usize, f64)], min_samples: usize) -> f64 {
     // min_samples includes the point itself => core distance is distance to min_samples-th nearest neighbor
-    if dists.len() < min_samples {
+    let n = neighbors.len();
+    if n < min_samples {
         return f64::INFINITY;
     }
-    dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    dists[min_samples - 1]
+
+    // Fast path: min_samples includes self at distance 0.0.
+    if min_samples == 1 {
+        return 0.0;
+    }
+
+    // Fast path: k == n means the largest neighbor distance.
+    if min_samples == n {
+        let mut max_d = f64::NEG_INFINITY;
+        for &(_, d) in neighbors {
+            if d > max_d {
+                max_d = d;
+            }
+        }
+        return max_d;
+    }
+
+    // Track the min_samples smallest distances in a bounded max-heap.
+    // This avoids copying all distances and keeps the computation non-mutating.
+    let mut smallest: BinaryHeap<OrderedFloat<f64>> = BinaryHeap::with_capacity(min_samples);
+    for &(_, d) in neighbors {
+        let od = OrderedFloat(d);
+        if smallest.len() < min_samples {
+            smallest.push(od);
+            continue;
+        }
+        if let Some(&top) = smallest.peek()
+            && od < top
+        {
+            smallest.pop();
+            smallest.push(od);
+        }
+    }
+    smallest.peek().map_or(f64::INFINITY, |v| v.0)
 }
 
 pub fn fit_optics(
@@ -157,7 +212,7 @@ pub fn fit_optics(
     let mut core_distances = vec![f64::INFINITY; n_samples];
     let mut predecessor = vec![-1i32; n_samples];
 
-    // Min-heap via Reverse
+    // Min-heap via Reverse.
     let mut seeds: BinaryHeap<(Reverse<OrderedFloat<f64>>, usize)> = BinaryHeap::new();
 
     for start in 0..n_samples {
@@ -165,8 +220,7 @@ pub fn fit_optics(
             continue;
         }
 
-        // Expand cluster order from this start point
-        let (nbrs, dists) = neighbors_within_eps(
+        let neighbors = neighbors_within_eps(
             data_ref,
             norms_ref,
             start,
@@ -177,20 +231,22 @@ pub fn fit_optics(
         );
         processed[start] = true;
         ordering.push(start);
+        // Safety: validated by `validate_inputs` (n_samples <= i32::MAX).
+        debug_assert!(start <= i32::MAX as usize);
+        let start_i32 = start as i32;
 
-        let core = core_distance_from_dists(dists.clone(), params.min_samples);
+        let core = core_distance_from_neighbors(&neighbors, params.min_samples);
         core_distances[start] = core;
 
         if core.is_finite() {
-            // Update seeds
-            for (&o, &dpo) in nbrs.iter().zip(dists.iter()) {
+            for &(o, dpo) in &neighbors {
                 if processed[o] {
                     continue;
                 }
                 let new_reach = core.max(dpo);
                 if new_reach < reachability[o] {
                     reachability[o] = new_reach;
-                    predecessor[o] = start as i32;
+                    predecessor[o] = start_i32;
                     seeds.push((Reverse(OrderedFloat(new_reach)), o));
                 }
             }
@@ -203,7 +259,8 @@ pub fn fit_optics(
                 if rq > reachability[q] {
                     continue;
                 } // stale entry
-                let (nbrs_q, dists_q) = neighbors_within_eps(
+
+                let neighbors_q = neighbors_within_eps(
                     data_ref,
                     norms_ref,
                     q,
@@ -214,18 +271,20 @@ pub fn fit_optics(
                 );
                 processed[q] = true;
                 ordering.push(q);
+                debug_assert!(q <= i32::MAX as usize);
+                let q_i32 = q as i32;
 
-                let core_q = core_distance_from_dists(dists_q.clone(), params.min_samples);
+                let core_q = core_distance_from_neighbors(&neighbors_q, params.min_samples);
                 core_distances[q] = core_q;
                 if core_q.is_finite() {
-                    for (&o, &dqo) in nbrs_q.iter().zip(dists_q.iter()) {
+                    for &(o, dqo) in &neighbors_q {
                         if processed[o] {
                             continue;
                         }
                         let new_reach = core_q.max(dqo);
                         if new_reach < reachability[o] {
                             reachability[o] = new_reach;
-                            predecessor[o] = q as i32;
+                            predecessor[o] = q_i32;
                             seeds.push((Reverse(OrderedFloat(new_reach)), o));
                         }
                     }
@@ -240,4 +299,132 @@ pub fn fit_optics(
         core_distances,
         predecessor,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Metric, OpticsParams, core_distance_from_neighbors, fit_optics, neighbors_within_eps,
+    };
+    #[test]
+    fn fit_optics_rejects_sample_count_larger_than_i32_max() {
+        let params = OpticsParams {
+            min_samples: 2,
+            max_eps: f64::INFINITY,
+            metric: Metric::Euclidean,
+            normalize_input: false,
+        };
+        let err = fit_optics(&[], i32::MAX as usize + 1, 1, &params).expect_err("must reject");
+        assert!(
+            matches!(err, crate::errors::ClustorError::InvalidArg(msg) if msg == "n_samples must be <= i32::MAX")
+        );
+    }
+
+    #[test]
+    fn core_distance_selects_min_samples_neighbor_without_full_sort() {
+        let neighbors = vec![(0, 0.8), (1, 0.1), (2, 0.0), (3, 0.6), (4, 0.4), (5, 0.2)];
+        let core = core_distance_from_neighbors(&neighbors, 4);
+        assert!((core - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn core_distance_is_infinite_when_not_enough_neighbors() {
+        let neighbors = vec![(0, 0.0), (1, 0.2)];
+        let core = core_distance_from_neighbors(&neighbors, 3);
+        assert!(core.is_infinite());
+    }
+
+    #[test]
+    fn core_distance_with_single_required_sample_is_zero_for_self_inclusion() {
+        let neighbors = vec![(0, 0.0), (1, 2.0), (2, 3.0)];
+        let core = core_distance_from_neighbors(&neighbors, 1);
+        assert_eq!(core, 0.0);
+    }
+
+    #[test]
+    fn core_distance_single_sample_zero_even_with_nonfinite_others() {
+        let neighbors = vec![(0, 0.0), (1, f64::INFINITY), (2, 9.0)];
+        let core = core_distance_from_neighbors(&neighbors, 1);
+        assert_eq!(core, 0.0);
+    }
+
+    #[test]
+    fn core_distance_handles_infinite_neighbors() {
+        let neighbors = vec![(0, 0.0), (1, f64::INFINITY), (2, 5.0)];
+        let core = core_distance_from_neighbors(&neighbors, 2);
+        assert_eq!(core, 5.0);
+    }
+
+    #[test]
+    fn core_distance_with_k_equal_to_neighbor_count_returns_max() {
+        let neighbors = vec![(0, 0.0), (1, 1.5), (2, 4.0), (3, 2.0)];
+        let core = core_distance_from_neighbors(&neighbors, neighbors.len());
+        assert_eq!(core, 4.0);
+    }
+
+    #[test]
+    fn core_distance_does_not_reorder_neighbors() {
+        let neighbors = vec![(10, 0.3), (11, 0.2), (12, 0.1)];
+        let _ = core_distance_from_neighbors(&neighbors, 2);
+        assert_eq!(neighbors, vec![(10, 0.3), (11, 0.2), (12, 0.1)]);
+    }
+
+    #[test]
+    fn neighbors_with_zero_eps_include_only_self() {
+        let data = vec![0.0, 1.0, 2.0];
+        let neighbors = neighbors_within_eps(&data, None, 1, 3, 1, Metric::Euclidean, 0.0);
+        assert_eq!(neighbors, vec![(1, 0.0)]);
+    }
+
+    #[test]
+    fn neighbors_with_infinite_eps_include_all_except_self_once() {
+        let data = vec![0.0, 1.0, 2.0, 4.0];
+        let neighbors =
+            neighbors_within_eps(&data, None, 1, 4, 1, Metric::Euclidean, f64::INFINITY);
+        assert_eq!(neighbors.len(), 4);
+        assert_eq!(neighbors[0], (1, 0.0));
+        let idxs: Vec<usize> = neighbors.iter().map(|(idx, _)| *idx).collect();
+        assert_eq!(idxs, vec![1, 0, 2, 3]);
+    }
+
+    #[test]
+    fn euclidean_distance_nan_from_infinities_is_treated_as_infinite() {
+        let data = vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 0.0];
+        let neighbors =
+            neighbors_within_eps(&data, None, 0, 2, 2, Metric::Euclidean, f64::INFINITY);
+        assert_eq!(neighbors[0], (0, 0.0));
+        assert_eq!(neighbors[1], (1, f64::INFINITY));
+    }
+
+    #[test]
+    fn nan_euclidean_distances_are_safely_mapped_to_infinity() {
+        let data = vec![f64::NAN, 0.0, 1.0, 0.0];
+        let neighbors =
+            neighbors_within_eps(&data, None, 0, 2, 2, Metric::Euclidean, f64::INFINITY);
+        assert_eq!(neighbors, vec![(0, 0.0), (1, f64::INFINITY)]);
+    }
+
+    #[test]
+    fn optics_reachability_is_stable_with_core_distance_selection() {
+        // 1D chain where each point should be density-reachable from immediate neighbors.
+        let data = vec![0.0, 1.0, 2.0, 3.0];
+        let params = OpticsParams {
+            min_samples: 2,
+            max_eps: f64::INFINITY,
+            metric: Metric::Euclidean,
+            normalize_input: false,
+        };
+
+        let out = fit_optics(&data, 4, 1, &params).expect("optics should succeed");
+
+        let start = out.ordering[0];
+        for i in 0..4 {
+            if i == start {
+                continue;
+            }
+            assert!(out.reachability[i].is_finite());
+            assert!(out.predecessor[i] >= 0);
+            assert!(out.predecessor[i] < i32::MAX);
+        }
+    }
 }
