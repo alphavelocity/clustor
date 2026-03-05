@@ -100,8 +100,69 @@ fn non_noise_inv_scale_from_labels(
 
 #[inline]
 fn build_clusters(labels: &[i64]) -> Vec<Vec<usize>> {
+    let mut non_noise_count = 0usize;
+    let mut min_label = i64::MAX;
+    let mut max_label = i64::MIN;
+
+    for &lab in labels {
+        if lab < 0 {
+            continue;
+        }
+        non_noise_count += 1;
+        if lab < min_label {
+            min_label = lab;
+        }
+        if lab > max_label {
+            max_label = lab;
+        }
+    }
+
+    if non_noise_count == 0 {
+        return Vec::new();
+    }
+
+    // Fast path for dense, near-contiguous label spaces (even when shifted away from zero).
+    // Guarded by checked arithmetic, a density threshold, and fallible reservations so sparse
+    // or very large label spaces safely fall back to hashing.
+    let dense_span_opt = max_label
+        .checked_sub(min_label)
+        .and_then(|d| d.checked_add(1))
+        .and_then(|span| usize::try_from(span).ok());
+
+    if let Some(dense_span) = dense_span_opt
+        && dense_span <= non_noise_count.saturating_mul(4)
+    {
+        let offset = min_label;
+        let mut dense_map = Vec::new();
+        if dense_map.try_reserve_exact(dense_span).is_ok() {
+            dense_map.resize(dense_span, usize::MAX);
+            let mut clusters: Vec<Vec<usize>> = Vec::new();
+            let _ = clusters.try_reserve(non_noise_count);
+
+            for (i, &lab) in labels.iter().enumerate() {
+                if lab < 0 {
+                    continue;
+                }
+                let dense_idx = (lab - offset) as usize;
+                let idx = if dense_map[dense_idx] == usize::MAX {
+                    let next = clusters.len();
+                    dense_map[dense_idx] = next;
+                    clusters.push(Vec::new());
+                    next
+                } else {
+                    dense_map[dense_idx]
+                };
+                clusters[idx].push(i);
+            }
+
+            return clusters;
+        }
+    }
+
     let mut label_to_cluster: HashMap<i64, usize> = HashMap::new();
+    let _ = label_to_cluster.try_reserve(non_noise_count);
     let mut clusters: Vec<Vec<usize>> = Vec::new();
+    let _ = clusters.try_reserve(non_noise_count);
 
     for (i, &lab) in labels.iter().enumerate() {
         if lab < 0 {
@@ -395,6 +456,83 @@ mod tests {
             Err(ClustorError::InvalidArg(msg)) => assert!(msg.contains(expected_substr)),
             other => panic!("expected InvalidArg, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_clusters_handles_dense_and_sparse_labels() {
+        let dense = vec![-1, 2, 0, 2, 1, -1, 0];
+        let dense_clusters = build_clusters(&dense);
+        assert_eq!(dense_clusters.len(), 3);
+        assert_eq!(dense_clusters[0], vec![1, 3]);
+        assert_eq!(dense_clusters[1], vec![2, 6]);
+        assert_eq!(dense_clusters[2], vec![4]);
+
+        let shifted_dense = vec![-1, 1_000_000, 1_000_002, 1_000_001, 1_000_002, 1_000_000];
+        let shifted_dense_clusters = build_clusters(&shifted_dense);
+        assert_eq!(shifted_dense_clusters.len(), 3);
+        assert_eq!(shifted_dense_clusters[0], vec![1, 5]);
+        assert_eq!(shifted_dense_clusters[1], vec![2, 4]);
+        assert_eq!(shifted_dense_clusters[2], vec![3]);
+
+        let sparse = vec![-1, 1_000_000_000, 7, 1_000_000_000, 7, -1, 42];
+        let sparse_clusters = build_clusters(&sparse);
+        assert_eq!(sparse_clusters.len(), 3);
+        assert_eq!(sparse_clusters[0], vec![1, 3]);
+        assert_eq!(sparse_clusters[1], vec![2, 4]);
+        assert_eq!(sparse_clusters[2], vec![6]);
+    }
+
+    #[test]
+    fn build_clusters_returns_empty_for_all_noise() {
+        let labels = vec![-1, -1, -1];
+        let clusters = build_clusters(&labels);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn silhouette_score_supports_cosine_metric() {
+        let data = vec![
+            1.0, 0.0, // c0
+            0.9, 0.1, // c0
+            0.0, 1.0, // c1
+            0.1, 0.9, // c1
+        ];
+        let labels = vec![0, 0, 1, 1];
+
+        let score = silhouette_score(&data, 4, 2, &labels, Metric::Cosine).unwrap();
+        assert!(score.is_finite());
+        assert!((-1.0..=1.0).contains(&score));
+    }
+
+    #[test]
+    fn calinski_harabasz_errors_when_total_dispersion_is_zero() {
+        let data = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let labels = vec![0, 0, 1];
+
+        assert_invalid_arg(
+            calinski_harabasz_score(&data, 3, 2, &labels),
+            "undefined for zero dispersion",
+        );
+    }
+
+    #[test]
+    fn calinski_harabasz_returns_infinity_when_within_cluster_dispersion_is_zero() {
+        let data = vec![0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0];
+        let labels = vec![0, 0, 1, 1];
+
+        let score = calinski_harabasz_score(&data, 4, 2, &labels).unwrap();
+        assert!(score.is_infinite());
+        assert!(score.is_sign_positive());
+    }
+
+    #[test]
+    fn davies_bouldin_handles_identical_centroids() {
+        let data = vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0];
+        let labels = vec![0, 0, 1, 1];
+
+        let score = davies_bouldin_score(&data, 4, 2, &labels).unwrap();
+        assert!(score.is_finite());
+        assert!(score >= 0.0);
     }
 
     #[test]

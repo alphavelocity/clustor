@@ -181,3 +181,33 @@ pub fn hac_linkage(
 
     Ok(z)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linkage_parse_supports_known_values() {
+        assert_eq!(Linkage::parse("single"), Some(Linkage::Single));
+        assert_eq!(Linkage::parse("COMPLETE"), Some(Linkage::Complete));
+        assert_eq!(Linkage::parse("average"), Some(Linkage::Average));
+        assert_eq!(Linkage::parse("ward"), Some(Linkage::Ward));
+        assert_eq!(Linkage::parse("bad"), None);
+    }
+
+    #[test]
+    fn hac_rejects_invalid_ward_metric() {
+        let data = vec![0.0, 0.0, 1.0, 1.0];
+        let err = hac_linkage(&data, 2, 2, Linkage::Ward, Metric::Cosine).unwrap_err();
+        assert!(
+            matches!(err, ClustorError::InvalidArg(msg) if msg.contains("ward linkage requires euclidean metric"))
+        );
+    }
+
+    #[test]
+    fn hac_returns_expected_shape() {
+        let data = vec![0.0, 0.0, 0.0, 1.0, 5.0, 5.0];
+        let z = hac_linkage(&data, 3, 2, Linkage::Average, Metric::Euclidean).unwrap();
+        assert_eq!(z.len(), (3 - 1) * 4);
+    }
+}

@@ -436,3 +436,34 @@ pub fn fit_birch(
         n_subclusters: n_sub,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> BirchParams {
+        BirchParams {
+            threshold: 0.5,
+            branching_factor: 10,
+            n_clusters: Some(2),
+        }
+    }
+
+    #[test]
+    fn birch_rejects_invalid_threshold() {
+        let data = vec![0.0, 0.0, 1.0, 1.0];
+        let mut p = params();
+        p.threshold = 0.0;
+        let err = fit_birch(&data, 2, 2, &p).unwrap_err();
+        assert!(matches!(err, ClustorError::InvalidArg(msg) if msg.contains("threshold")));
+    }
+
+    #[test]
+    fn birch_smoke_with_kmeans_compression() {
+        let data = vec![0.0, 0.0, 0.1, 0.0, 5.0, 5.0, 5.1, 5.0];
+        let out = fit_birch(&data, 4, 2, &params()).unwrap();
+        assert_eq!(out.labels.len(), 4);
+        assert_eq!(out.centers.len(), 4);
+        assert!(out.n_subclusters >= 2);
+    }
+}

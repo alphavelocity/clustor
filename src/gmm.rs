@@ -383,11 +383,23 @@ pub fn sample_gmm_diag(
     n_samples: usize,
     seed: Option<u64>,
 ) -> Vec<f64> {
+    if k == 0 || d == 0 || n_samples == 0 {
+        return Vec::new();
+    }
+    let kd = match k.checked_mul(d) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    if weights.len() < k || means.len() < kd || covars.len() < kd {
+        return Vec::new();
+    }
+
     let mut rng = StdRng::seed_from_u64(seed.unwrap_or_else(|| rand::rng().random::<u64>()));
     let mut cum = vec![0.0; k];
     let mut s = 0.0;
     for (i, cum_i) in cum.iter_mut().enumerate() {
-        s += weights[i];
+        let w = weights[i];
+        s += if w.is_finite() && w > 0.0 { w } else { 0.0 };
         *cum_i = s;
     }
     if s <= 0.0 {
@@ -400,15 +412,93 @@ pub fn sample_gmm_diag(
     let mut out = vec![0.0; n_samples * d];
     for i in 0..n_samples {
         let r: f64 = rng.random_range(0.0..total);
-        let mut c = 0usize;
-        while c + 1 < k && r > cum[c] {
-            c += 1;
-        }
+        let c = cum.partition_point(|&v| v < r).min(k - 1);
         let mu = &means[c * d..(c + 1) * d];
         let var = &covars[c * d..(c + 1) * d];
         for j in 0..d {
-            out[i * d + j] = mu[j] + std_normal(&mut rng) * var[j].sqrt();
+            let sigma = var[j].max(0.0).sqrt();
+            out[i * d + j] = mu[j] + std_normal(&mut rng) * sigma;
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> GmmParams {
+        GmmParams {
+            n_components: 2,
+            max_iter: 20,
+            tol: 1e-4,
+            reg_covar: 1e-6,
+            init: "kmeans++".to_string(),
+            random_state: Some(0),
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn gmm_rejects_invalid_component_count() {
+        let data = vec![0.0, 0.0, 1.0, 1.0];
+        let mut p = params();
+        p.n_components = 0;
+        let err = fit_gmm_diag(&data, 2, 2, &p, None).unwrap_err();
+        assert!(matches!(err, ClustorError::InvalidArg(msg) if msg.contains("n_components")));
+    }
+
+    #[test]
+    fn sample_gmm_diag_handles_invalid_shapes_and_zero_sizes() {
+        assert!(sample_gmm_diag(&[], &[], &[], 0, 2, 5, Some(1)).is_empty());
+        assert!(sample_gmm_diag(&[1.0], &[0.0], &[1.0], 1, 1, 0, Some(1)).is_empty());
+        assert!(sample_gmm_diag(&[1.0], &[0.0], &[1.0], 1, 2, 3, Some(1)).is_empty());
+    }
+
+    #[test]
+    fn sample_gmm_diag_can_select_last_component() {
+        let out = sample_gmm_diag(
+            &[0.0, 0.0, 1.0],
+            &[0.0, 0.0, 9.0],
+            &[1.0, 1.0, 0.0],
+            3,
+            1,
+            8,
+            Some(123),
+        );
+        assert_eq!(out.len(), 8);
+        assert!(out.iter().all(|&v| (v - 9.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn sample_gmm_diag_sanitizes_non_positive_weights_and_negative_variance() {
+        let out = sample_gmm_diag(
+            &[f64::NAN, -1.0, 0.0],
+            &[0.0, 0.0, 0.0],
+            &[-1.0, -4.0, -9.0],
+            3,
+            1,
+            4,
+            Some(42),
+        );
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn gmm_fit_and_helpers_smoke() {
+        let data = vec![0.0, 0.0, 0.2, 0.1, 5.0, 5.0, 5.2, 5.1];
+        let out = fit_gmm_diag(&data, 4, 2, &params(), None).unwrap();
+        assert_eq!(out.weights.len(), 2);
+        assert_eq!(out.means.len(), 4);
+        assert_eq!(out.covars.len(), 4);
+        assert_eq!(out.resp.len(), 8);
+
+        let (resp, ll) = gmm_log_resp_diag(&out.weights, &out.means, &out.covars, &data, 4, 2, 2);
+        assert_eq!(resp.len(), 8);
+        assert_eq!(ll.len(), 4);
+
+        let samples = sample_gmm_diag(&out.weights, &out.means, &out.covars, 2, 2, 3, Some(7));
+        assert_eq!(samples.len(), 6);
+    }
 }

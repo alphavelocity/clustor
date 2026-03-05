@@ -288,3 +288,46 @@ pub fn fit_affinity_propagation(
         n_iter: it_done,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(metric: Metric) -> AffinityParams {
+        AffinityParams {
+            damping: 0.7,
+            max_iter: 20,
+            convergence_iter: 5,
+            preference: None,
+            metric,
+            normalize_input: false,
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn affinity_rejects_invalid_damping() {
+        let data = vec![0.0, 0.0, 1.0, 1.0];
+        let mut p = params(Metric::Euclidean);
+        p.damping = 1.0;
+        let err = fit_affinity_propagation(&data, 2, 2, &p).unwrap_err();
+        assert!(matches!(err, ClustorError::InvalidArg(msg) if msg.contains("damping")));
+    }
+
+    #[test]
+    fn affinity_euclidean_smoke() {
+        let data = vec![0.0, 0.0, 0.1, 0.0, 5.0, 5.0, 5.1, 5.0];
+        let out = fit_affinity_propagation(&data, 4, 2, &params(Metric::Euclidean)).unwrap();
+        assert_eq!(out.labels.len(), 4);
+        assert!(!out.exemplars.is_empty());
+    }
+
+    #[test]
+    fn affinity_cosine_with_normalization_smoke() {
+        let data = vec![1.0, 0.0, 0.9, 0.1, 0.0, 1.0, 0.1, 0.9];
+        let mut p = params(Metric::Cosine);
+        p.normalize_input = true;
+        let out = fit_affinity_propagation(&data, 4, 2, &p).unwrap();
+        assert_eq!(out.labels.len(), 4);
+    }
+}
