@@ -30,6 +30,42 @@ TWO_SAMPLE_X = np.array([[0.0], [1.0]], dtype=np.float64)
 BAD_SW_2D = np.array([[1.0], [1.0]], dtype=np.float64)
 BAD_SW_LEN = np.array([1.0], dtype=np.float64)
 
+ESTIMATOR_SAMPLE_WEIGHT_FACTORIES = [
+    pytest.param(
+        lambda: clustor.KMeans(n_clusters=1, n_init=1, random_state=0),
+        id="kmeans",
+    ),
+    pytest.param(
+        lambda: clustor.GaussianMixture(1, max_iter=10, random_state=0),
+        id="gaussian_mixture",
+    ),
+]
+
+FUNCTIONAL_SAMPLE_WEIGHT_KWARGS = {
+    "kmeans": {"k": 1, "n_init": 1, "random_state": 0},
+    "gaussian_mixture": {"n_components": 1, "max_iter": 5, "random_state": 0},
+}
+
+FUNCTIONAL_SAMPLE_WEIGHT_CASES = [
+    pytest.param(
+        clustor.kmeans, FUNCTIONAL_SAMPLE_WEIGHT_KWARGS["kmeans"], id="kmeans"
+    ),
+    pytest.param(
+        clustor.gaussian_mixture,
+        FUNCTIONAL_SAMPLE_WEIGHT_KWARGS["gaussian_mixture"],
+        id="gaussian_mixture",
+    ),
+]
+
+FUNCTIONAL_DISPATCH_DROP_CASES = [
+    pytest.param("_kmeans", FUNCTIONAL_SAMPLE_WEIGHT_KWARGS["kmeans"], id="kmeans"),
+    pytest.param(
+        "_gaussian_mixture",
+        FUNCTIONAL_SAMPLE_WEIGHT_KWARGS["gaussian_mixture"],
+        id="gaussian_mixture",
+    ),
+]
+
 ESTIMATOR_FACTORIES = [
     pytest.param(
         lambda: clustor.KMeans(n_clusters=1, n_init=1, random_state=0),
@@ -129,45 +165,69 @@ def test_kmeans_fit_accepts_non_contiguous_input():
     assert out["centers"].shape == (2, 1)
 
 
-def test_kmeans_fit_rejects_non_1d_sample_weight():
-    km = clustor.KMeans(n_clusters=1, n_init=1, random_state=0)
+@pytest.mark.parametrize("estimator_factory", ESTIMATOR_SAMPLE_WEIGHT_FACTORIES)
+def test_estimators_fit_reject_non_1d_sample_weight(estimator_factory):
     with pytest.raises(ValueError, match="1D"):
-        km.fit(TWO_SAMPLE_X, sample_weight=BAD_SW_2D)
+        estimator_factory().fit(TWO_SAMPLE_X, sample_weight=BAD_SW_2D)
 
 
-def test_gaussian_mixture_fit_rejects_non_1d_sample_weight():
-    gm = clustor.GaussianMixture(1, max_iter=10, random_state=0)
-    with pytest.raises(ValueError, match="1D"):
-        gm.fit(TWO_SAMPLE_X, sample_weight=BAD_SW_2D)
+@pytest.mark.parametrize(("fn", "kwargs"), FUNCTIONAL_SAMPLE_WEIGHT_CASES)
+def test_functional_apis_accept_explicit_none_sample_weight(fn, kwargs):
+    fn(TWO_SAMPLE_X, sample_weight=None, **kwargs)
 
 
-def test_kmeans_functional_api_rejects_non_1d_sample_weight():
-    with pytest.raises(ValueError, match="1D"):
-        clustor.kmeans(
-            TWO_SAMPLE_X,
+def _make_fake_kmeans(captured):
+    def _fake_kmeans(X, k, **kwargs):
+        captured["kwargs"] = kwargs
+        return (
+            np.zeros((1, X.shape[1]), dtype=np.float64),
+            np.zeros(X.shape[0], dtype=np.int32),
+            0.0,
             1,
-            sample_weight=BAD_SW_2D,
-            n_init=1,
-            random_state=0,
         )
 
+    return _fake_kmeans
 
-def test_gaussian_mixture_functional_api_rejects_non_1d_sample_weight():
-    with pytest.raises(ValueError, match="1D"):
-        clustor.gaussian_mixture(
-            TWO_SAMPLE_X,
+
+def _make_fake_gaussian_mixture(captured):
+    def _fake_gaussian_mixture(X, n_components, **kwargs):
+        captured["kwargs"] = kwargs
+        n_samples, n_features = X.shape
+        return (
+            np.ones(n_components, dtype=np.float64),
+            np.zeros((n_components, n_features), dtype=np.float64),
+            np.ones((n_components, n_features), dtype=np.float64),
+            np.ones((n_samples, n_components), dtype=np.float64),
+            True,
+            0.0,
             1,
-            sample_weight=BAD_SW_2D,
         )
 
+    return _fake_gaussian_mixture
 
-@pytest.mark.parametrize(
-    ("fn", "kwargs"),
-    [
-        (clustor.kmeans, {"k": 1, "n_init": 1, "random_state": 0}),
-        (clustor.gaussian_mixture, {"n_components": 1}),
-    ],
-)
+
+@pytest.mark.parametrize(("target", "kwargs"), FUNCTIONAL_DISPATCH_DROP_CASES)
+def test_functional_apis_drop_none_sample_weight_before_dispatch(
+    monkeypatch, target, kwargs
+):
+    captured = {}
+    if target == "_kmeans":
+        monkeypatch.setattr(clustor, target, _make_fake_kmeans(captured))
+        clustor.kmeans(TWO_SAMPLE_X, sample_weight=None, **kwargs)
+    else:
+        monkeypatch.setattr(clustor, target, _make_fake_gaussian_mixture(captured))
+        clustor.gaussian_mixture(TWO_SAMPLE_X, sample_weight=None, **kwargs)
+
+    assert "sample_weight" not in captured["kwargs"]
+
+
+@pytest.mark.parametrize(("fn", "kwargs"), FUNCTIONAL_SAMPLE_WEIGHT_CASES)
+def test_functional_apis_reject_non_1d_sample_weight(fn, kwargs):
+    with pytest.raises(ValueError, match="1D"):
+        fn(TWO_SAMPLE_X, sample_weight=BAD_SW_2D, **kwargs)
+
+
+@pytest.mark.parametrize(("fn", "kwargs"), FUNCTIONAL_SAMPLE_WEIGHT_CASES)
 def test_functional_apis_reject_sample_weight_length_mismatch(fn, kwargs):
     with pytest.raises(ValueError, match="length"):
         fn(TWO_SAMPLE_X, sample_weight=BAD_SW_LEN, **kwargs)

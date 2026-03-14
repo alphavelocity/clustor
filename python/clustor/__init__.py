@@ -84,6 +84,26 @@ def _as_f64_1d(x, n: int | None = None) -> _np.ndarray:
     return arr
 
 
+def _coerce_data_and_sample_weight(
+    X, sample_weight=None
+) -> tuple[_np.ndarray, _np.ndarray | None]:
+    """Validate and convert feature matrix and optional sample weights once."""
+    Xc = _as_f64_2d(X)
+    sw = None if sample_weight is None else _as_f64_1d(sample_weight, Xc.shape[0])
+    return Xc, sw
+
+
+def _coerce_x_and_update_sample_weight_kwarg(
+    X, kwargs: dict[str, object]
+) -> _np.ndarray:
+    """Coerce X and normalize optional ``sample_weight`` inside kwargs in-place."""
+    sample_weight = kwargs.pop("sample_weight", None)
+    Xc, sw = _coerce_data_and_sample_weight(X, sample_weight)
+    if sw is not None:
+        kwargs["sample_weight"] = sw
+    return Xc
+
+
 class KMeans(_KMeans):
     """KMeans clustering with KMeans++ initialization.
 
@@ -110,13 +130,11 @@ class KMeans(_KMeans):
     """
 
     def fit(self, X, *, sample_weight=None):  # noqa: N802
-        Xc = _as_f64_2d(X)
-        sw = None if sample_weight is None else _as_f64_1d(sample_weight, Xc.shape[0])
+        Xc, sw = _coerce_data_and_sample_weight(X, sample_weight)
         return super().fit(Xc, sample_weight=sw)
 
     def fit_predict(self, X, *, sample_weight=None):  # noqa: N802
-        Xc = _as_f64_2d(X)
-        sw = None if sample_weight is None else _as_f64_1d(sample_weight, Xc.shape[0])
+        Xc, sw = _coerce_data_and_sample_weight(X, sample_weight)
         return super().fit_predict(Xc, sample_weight=sw)
 
     def predict(self, X):  # noqa: N802
@@ -186,13 +204,11 @@ class BisectingKMeans(_BisectingKMeans):
     """
 
     def fit(self, X, *, sample_weight=None):  # noqa: N802
-        Xc = _as_f64_2d(X)
-        sw = None if sample_weight is None else _as_f64_1d(sample_weight, Xc.shape[0])
+        Xc, sw = _coerce_data_and_sample_weight(X, sample_weight)
         return super().fit(Xc, sample_weight=sw)
 
     def fit_predict(self, X, *, sample_weight=None):  # noqa: N802
-        Xc = _as_f64_2d(X)
-        sw = None if sample_weight is None else _as_f64_1d(sample_weight, Xc.shape[0])
+        Xc, sw = _coerce_data_and_sample_weight(X, sample_weight)
         return super().fit_predict(Xc, sample_weight=sw)
 
     def predict(self, X):  # noqa: N802
@@ -253,8 +269,7 @@ class GaussianMixture(_GaussianMixture):
     """
 
     def fit(self, X, *, sample_weight=None):  # noqa: N802
-        Xc = _as_f64_2d(X)
-        sw = None if sample_weight is None else _as_f64_1d(sample_weight, Xc.shape[0])
+        Xc, sw = _coerce_data_and_sample_weight(X, sample_weight)
         return super().fit(Xc, sample_weight=sw)
 
     def predict(self, X):  # noqa: N802
@@ -381,9 +396,7 @@ def kmeans(X, k: int, **kwargs):
         >>> labels.shape
         (2,)
     """
-    Xc = _as_f64_2d(X)
-    if "sample_weight" in kwargs and kwargs["sample_weight"] is not None:
-        kwargs["sample_weight"] = _as_f64_1d(kwargs["sample_weight"], Xc.shape[0])
+    Xc = _coerce_x_and_update_sample_weight_kwarg(X, kwargs)
     return _kmeans(Xc, int(k), **kwargs)
 
 
@@ -429,9 +442,7 @@ def gaussian_mixture(X, n_components: int, **kwargs):
         >>> weights.shape
         (1,)
     """
-    Xc = _as_f64_2d(X)
-    if "sample_weight" in kwargs and kwargs["sample_weight"] is not None:
-        kwargs["sample_weight"] = _as_f64_1d(kwargs["sample_weight"], Xc.shape[0])
+    Xc = _coerce_x_and_update_sample_weight_kwarg(X, kwargs)
     return _gaussian_mixture(Xc, int(n_components), **kwargs)
 
 

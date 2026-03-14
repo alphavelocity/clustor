@@ -13,6 +13,7 @@ Clustor
 [![Test Windows](https://github.com/alphavelocity/clustor/actions/workflows/test_windows.yml/badge.svg)](https://github.com/alphavelocity/clustor/actions/workflows/test_windows.yml?query=branch%3Amain)
 [![Lints](https://github.com/alphavelocity/clustor/actions/workflows/lints.yml/badge.svg)](https://github.com/alphavelocity/clustor/actions/workflows/lints.yml?query=branch%3Amain)
 [![License](https://img.shields.io/badge/License-Apache%202.0-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
+[![DOI:10.22214/ijraset.2026.77975](https://img.shields.io/badge/DOI-10.22214/ijraset.2026.77975-blue.svg)](https://doi.org/10.22214/ijraset.2026.77975)
 
 </div>
 
@@ -373,9 +374,9 @@ If you use clustor in your work and wish to refer to it, please use the followin
 ```bibtex
 @software{clustor,
   author = {Soumyadip Sarkar},
-  title = {Clustor: Rust-accelerated High-Performance Clustering Algorithms},
+  title = {Clustor: A Lightweight Rust-Accelerated Clustering Toolkit},
   year = {2026},
-  url = {https://github.com/alphavelocity/clustor}
+  url = {https://doi.org/10.22214/ijraset.2026.77975}
 }
 ```
 
